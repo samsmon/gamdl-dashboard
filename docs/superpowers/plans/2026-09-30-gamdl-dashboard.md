@@ -3045,6 +3045,8 @@ class Runner:
 
     def _on_line(self, iid, raw, run):
         for ev in parse_line(raw):
+            if isinstance(ev, (TrackStart, TrackSkip, TrackError, TrackDelay)):
+                self.bus.publish({"type": "tracks", "item_id": iid})  # UI reloads the open track list
             v = self.guard.on_event(ev)
             if v and run.verdict is None:
                 run.verdict = v
@@ -3670,7 +3672,7 @@ git add -A && git commit -m "feat: http api, sse events and app entrypoint"
     <textarea id="urls" rows="3" spellcheck="false"></textarea>
     <div class="row"><button id="btn-preview">preview</button><span id="add-msg"></span></div>
     <table id="pv" hidden>
-      <thead><tr><th></th><th>title</th><th>artist</th><th>tracks</th><th>library</th></tr></thead>
+      <thead><tr><th></th><th>title</th><th>artist</th><th>tracks</th><th>library check</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
     <div class="row" id="pv-actions" hidden><button id="btn-queue">queue selected</button></div>
@@ -3678,15 +3680,14 @@ git add -A && git commit -m "feat: http api, sse events and app entrypoint"
   <section id="queue">
     <div class="tablewrap">
     <table>
-      <thead><tr><th>#</th><th>status</th><th>album</th><th>track</th><th>album</th><th>track</th><th>speed</th><th></th></tr></thead>
+      <thead><tr><th><span class="sr">expand</span></th><th>#</th><th>status</th><th>album</th><th>track</th><th>album</th><th>track</th><th>speed</th><th></th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
     </div>
     <p id="empty" hidden>queue is empty.</p>
   </section>
   <nav id="tabs" role="tablist">
-    <button role="tab" data-tab="tracks" aria-selected="true">tracks</button>
-    <button role="tab" data-tab="done">completed</button>
+    <button role="tab" data-tab="done" aria-selected="true">completed</button>
     <button role="tab" data-tab="settings">settings</button>
   </nav>
   <section id="panel"></section>
@@ -3746,8 +3747,15 @@ tr.sel { background: color-mix(in srgb, var(--fg) 8%, transparent); }
 pre#log { height: 220px; overflow: auto; margin: 8px 0 0; padding: 8px; border: 1px solid var(--line); white-space: pre-wrap; word-break: break-word; }
 pre#log .lvl-WARNING, pre#log .lvl-ERROR, pre#log .lvl-CRITICAL { font-weight: bold; }
 ul.plain { margin: 4px 0; padding-left: 16px; }
+.flag { background: var(--inv-bg); color: var(--inv-fg); padding: 0 4px; display: inline-block; }
+.detail > td { padding: 0 0 8px 24px; border-bottom: 1px solid var(--line); }
+table.tracks th, table.tracks td { padding: 2px 8px; }
+table.tracks { width: auto; min-width: 60%; }
+button[aria-expanded] { min-width: 24px; }
+.sr { position: absolute; left: -9999px; }
+.done-item { padding: 8px 0; border-bottom: 1px solid var(--line); }
 .field { display: grid; grid-template-columns: 220px 1fr; gap: 8px; margin: 6px 0; align-items: center; }
-@media (max-width: 640px) { .field { grid-template-columns: 1fr; } th:nth-child(4), td:nth-child(4) { display: none; } }
+@media (max-width: 640px) { .field { grid-template-columns: 1fr; } #queue th:nth-child(5), #queue td:nth-child(5) { display: none; } }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 ```
 
@@ -4043,7 +4051,8 @@ Run the app in the background (forward slashes matter):
 ```bash
 GAMDL_DASH_GAMDL_CMD="py -3 tools/fake_gamdl_safe.py" GAMDL_DASH_EXTRA_ARGS="" GAMDL_DASH_DB=data/dev.sqlite GAMDL_DASH_STAGING=data/staging GAMDL_DASH_DISK_PATH=. GAMDL_DASH_COOKIES=data/none.txt GAMDL_DASH_CATALOG=data/none.sqlite FAKE_OUT=data/staging FAKE_SLEEP=0.4 GAMDL_DASH_PORT=8110 .venv/Scripts/python -m app
 ```
-Then with the built-in browser (`preview_start` with `url: http://127.0.0.1:8110`): paste the two example URLs, click preview, confirm both rows show the `/jp/` normalized URL and "checking..." then a result without crashing (preview will show `none` since the network fetch is allowed to fail), queue them, watch row 1 go ▶ downloading with a moving track bar, then album delay countdown before row 2, click pause, resume, cancel, and open all three tabs. Then take screenshots at desktop width and at `resize_window` preset `mobile`, each with `colorScheme` light and dark. Check: greys only, no horizontal page scroll at 375 px, focus ring visible via Tab, banner shows after triggering the rate-limit scenario (restart with `FAKE_SCENARIO=rate_limit FAKE_TRACKS=6`).
+Then with the built-in browser (`preview_start` with `url: http://127.0.0.1:8110`): paste the two example URLs, click preview, confirm both rows show the `/jp/` normalized URL and "checking..." then a result without crashing (preview will show `none` since the network fetch is allowed to fail), queue them, watch row 1 go ▶ downloading with a moving track bar, then album delay countdown before row 2, click pause, resume, cancel, and open both tabs (completed, settings). Then take screenshots at desktop width and at `resize_window` preset `mobile`, each with `colorScheme` light and dark. Check: greys only, no horizontal page scroll at 375 px, focus ring visible via Tab, banner shows after triggering the rate-limit scenario (restart with `FAKE_SCENARIO=rate_limit FAKE_TRACKS=6`).
+Expandable detail (spec 8.10): album rows show a "+" button (collapsed by default, `aria-expanded="false"`); press it (mouse and Enter/Space) and the track list appears under the row and updates live while downloading, `aria-expanded="true"`; run once with `FAKE_TRACKS=1` and confirm the single-track item has NO toggle; finished albums show a toggle in the completed tab too. Preview: with the fake `FAKE_OUT` album already in `data/staging`, a matching URL shows "in staging" with a "download anyway" button and an unchecked box. Retry: with `FAKE_SCENARIO=fail` an item shows "retry 1/2 in N s" counting down.
 Expected: no console errors (`read_console_messages onlyErrors`). Stop the server afterwards (`preview_stop`), delete `data/`.
 
 - [ ] **Step 6: Commit**
