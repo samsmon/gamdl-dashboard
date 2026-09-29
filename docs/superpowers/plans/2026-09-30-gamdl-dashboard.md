@@ -112,6 +112,7 @@ def test_defaults():
     assert c.gamdl_cmd == ["/usr/local/bin/gamdl-safe"]
     assert c.extra_args == ["--no-exceptions"]
     assert c.staging_dir == "/mnt/hdd-backup/music/_gamdl-incoming"
+    assert c.library_csv == "/mnt/hdd-backup/music/metadata.csv"
     assert c.autostart is True
 
 
@@ -158,6 +159,7 @@ class Config:
     host: str
     port: int
     autostart: bool
+    library_csv: str = ""
 
 
 def _split(value: str) -> list:
@@ -177,6 +179,7 @@ def from_env(env: Mapping[str, str] | None = None) -> Config:
         host=e.get("GAMDL_DASH_HOST", "0.0.0.0"),
         port=int(e.get("GAMDL_DASH_PORT", "8110")),
         autostart=e.get("GAMDL_DASH_AUTOSTART", "1") not in ("0", "false", "no"),
+        library_csv=e.get("GAMDL_DASH_LIBRARY_CSV", "/mnt/hdd-backup/music/metadata.csv"),
     )
 ```
 
@@ -2245,7 +2248,9 @@ git add -A && git commit -m "feat: detect codec with ffprobe and classify albums
 **Interfaces:**
 - Consumes: `app.urls.ParsedUrl`.
 - Produces:
-  - `@dataclass Preview(title:str, artist:str, tracks:int|None, year:str|None, source:str)` with `source in {"web","none"}`.
+  - `@dataclass Preview(title:str, artist:str, tracks:int|None, year:str|None, source:str, track_titles:list=[], durations:list=[])` with `source in {"web","none"}`; `durations` in seconds (`None` per unknown track). Method `remote() -> app.library.RemoteAlbum` (used by the library check).
+  - `parse_iso_duration(s:str|None) -> float|None` (`"PT3M25S"` -> 205.0, `"PT1H2M3.5S"` -> 3723.5, junk -> `None`).
+  - The default getter sends `Accept-Language: ja-JP,ja;q=0.9` so names match what gamdl downloads from `/jp/`.
   - `parse_page(html:str) -> Preview|None`: reads `application/ld+json` (`MusicAlbum`/`MusicPlaylist`), falls back to `og:title`.
   - `class PreviewService(getter=None, delay=(3.0, 8.0), sleep=asyncio.sleep, rand=random.uniform)`; `async fetch(parsed) -> Preview`. Requests are serialized by a lock and separated by a random delay (none before the first). It sends no cookies. Any error returns `Preview("", "", None, None, "none")`.
   - Default `getter(url) -> str` uses `httpx.AsyncClient(timeout=15, follow_redirects=True)` with a plain browser User-Agent and no cookies.
@@ -2255,7 +2260,7 @@ git add -A && git commit -m "feat: detect codec with ffprobe and classify albums
 ```python
 import json
 
-from app.preview import Preview, PreviewService, parse_page
+from app.preview import Preview, PreviewService, parse_iso_duration, parse_page
 from app.urls import normalize
 
 LD = {
@@ -2275,6 +2280,23 @@ def test_parse_jsonld_counts_track_list():
     ld = dict(LD); del ld["numTracks"]; ld["track"] = [{"name": "a"}, {"name": "b"}]
     p = parse_page(f'<script type="application/ld+json">{json.dumps(ld)}</script>')
     assert p.tracks == 2
+
+
+def test_parse_iso_duration():
+    assert parse_iso_duration("PT3M25S") == 205.0
+    assert parse_iso_duration("PT1H2M3.5S") == 3723.5
+    assert parse_iso_duration("PT45S") == 45.0
+    assert parse_iso_duration("junk") is None and parse_iso_duration(None) is None
+
+
+def test_parse_track_titles_and_durations_into_remote_album():
+    ld = dict(LD); del ld["numTracks"]
+    ld["track"] = [{"@type": "MusicRecording", "name": "心の奥", "duration": "PT3M20S"},
+                   {"@type": "MusicRecording", "name": "草々不一"}]
+    p = parse_page(f'<script type="application/ld+json">{json.dumps(ld, ensure_ascii=False)}</script>')
+    assert p.track_titles == ["心の奥", "草々不一"] and p.durations == [200.0, None] and p.tracks == 2
+    r = p.remote()
+    assert (r.title, r.artist, r.tracks, r.track_titles, r.durations) == ("溜息", "アーティスト", 2, ["心の奥", "草々不一"], [200.0, None])
 
 
 def test_parse_og_fallback():
@@ -2321,8 +2343,11 @@ import html as htmllib
 import json
 import random
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from app.library import RemoteAlbum
+
+_ISO = re.compile(r"^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$")
 _LD = re.compile(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', re.S | re.I)
 _OG = re.compile(r'<meta[^>]+property="og:title"[^>]+content="([^"]*)"', re.I)
 _UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
@@ -2335,6 +2360,19 @@ class Preview:
     tracks: int | None
     year: str | None
     source: str
+    track_titles: list = field(default_factory=list)
+    durations: list = field(default_factory=list)
+
+    def remote(self) -> RemoteAlbum:
+        return RemoteAlbum(self.title, self.artist, self.tracks, list(self.track_titles), list(self.durations))
+
+
+def parse_iso_duration(s):
+    m = _ISO.match(s or "")
+    if not m or not any(m.groups()):
+        return None
+    h, mi, sec = m.groups()
+    return int(h or 0) * 3600 + int(mi or 0) * 60 + float(sec or 0)
 
 
 def _artist(by) -> str:
@@ -2351,11 +2389,13 @@ def parse_page(page: str):
             continue
         for d in data if isinstance(data, list) else [data]:
             if isinstance(d, dict) and d.get("@type") in ("MusicAlbum", "MusicPlaylist"):
+                listed = [t for t in d.get("track", []) if isinstance(t, dict)] if isinstance(d.get("track"), list) else []
                 tracks = d.get("numTracks")
-                if tracks is None and isinstance(d.get("track"), list):
-                    tracks = len(d["track"])
+                if tracks is None and listed:
+                    tracks = len(listed)
                 year = str(d.get("datePublished", ""))[:4] or None
-                return Preview(d.get("name", ""), _artist(d.get("byArtist")), tracks, year, "web")
+                return Preview(d.get("name", ""), _artist(d.get("byArtist")), tracks, year, "web",
+                               [t.get("name", "") for t in listed], [parse_iso_duration(t.get("duration")) for t in listed])
     m = _OG.search(page)
     if m:
         title = htmllib.unescape(m[1]).removesuffix(" on Apple Music").strip()
@@ -2365,7 +2405,8 @@ def parse_page(page: str):
 
 async def _default_getter(url: str) -> str:
     import httpx
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers={"User-Agent": _UA}) as c:
+    headers = {"User-Agent": _UA, "Accept-Language": "ja-JP,ja;q=0.9"}
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers=headers) as c:
         r = await c.get(url)
         r.raise_for_status()
         return r.text
@@ -2413,7 +2454,7 @@ git add -A && git commit -m "feat: preview service from public album pages"
     `async run_forever()`, `stop()`, `wake()`, `async pause()`, `async resume()`, `async cancel(item_id)`.
   - Store flags used: `paused` (`"1"`), banner kinds `rate_limited, cookies, cap_reached, disk_low, forecast, busy, gamdl_missing, recovered`.
   - Bus events published: `{"type":"state"}`, `{"type":"progress","item_id","pct","speed","delay_kind","delay_until"}`, `{"type":"log","item_id","level","text","ts"}`.
-- Behavior contract: see spec section 3 "runner". Decisions worth restating: pause = stop after the current track (terminate at the next `TrackDelay` event) and return the item to `queued`; rate-limit or auth verdict terminates immediately, returns the item to `queued`, sets `paused` and the banner; a lock-held message (`already running`) returns the item to `queued`, sets banner `busy` and pauses; between items the runner waits `rand(album_delay)` minus time elapsed since the last item finished (`_last_finish`), in 1 s slices, aborting if paused.
+- Behavior contract: see spec section 3 "runner". Decisions worth restating: pause = stop after the current track (terminate at the next `TrackDelay` event) and return the item to `queued`; rate-limit or auth verdict terminates immediately, returns the item to `queued`, sets `paused` and the banner; a lock-held message (`already running`) returns the item to `queued`, sets banner `busy` and pauses; between items the runner waits `rand(album_delay)` minus time elapsed since the last item finished (`_last_finish`), in 1 s slices, aborting if paused. Retry (spec 8.9): when a run ends with track errors or a crash that is neither a guard verdict nor a cancel/pause, and `attempts < track_retries`, the item returns to `queued` with `attempts+1` and `not_before = now + rand(retry_backoff)`; `step()` only considers items whose `not_before` has passed (`store.next_queued(clock())`), so other due items run meanwhile, still one at a time. `_finish` is `async` and runs the blocking ffprobe/checker work via `asyncio.to_thread`; on success it stores `codec`, `classification`, `findings`, `output_path`, `size_bytes`.
 
 - [ ] **Step 1: Write the bus test and implement the bus**
 
@@ -2468,7 +2509,9 @@ Run: `.venv/Scripts/python -m pytest tests/test_bus.py -v` → PASS.
 ```python
 #!/usr/bin/env python3
 """Stand-in for gamdl-safe used by tests and local dev. Scenario via FAKE_SCENARIO:
-ok | rate_limit | auth | slow | crash | busy. Never talks to the network."""
+ok | rate_limit | auth | slow | crash | busy | flaky | fail. Never talks to the network.
+flaky/fail: track 2 raises a non-rate-limit error ("read timeout"); flaky succeeds on the next
+run when FAKE_STATE points at a file path that survives between runs."""
 import os
 import sys
 import time
@@ -2491,6 +2534,7 @@ if scenario == "busy":
     sys.exit(1)
 
 say(f'[INFO     19:00:00] URL   1/1  Processing "{url}"\n')
+failed = 0
 for i in range(1, tracks + 1):
     say(f'[INFO     19:00:{i:02d}] [Track {i:3d}/{tracks:<3d}] Downloading "Song {i}"\n')
     for pct in ("10.0", "55.5", "100.0"):
@@ -2500,6 +2544,15 @@ for i in range(1, tracks + 1):
     if scenario == "rate_limit":
         say(f'[ERROR    19:00:{i:02d}] Error downloading "Song {i}": HTTP 429 Too Many Requests\n')
         continue
+    if scenario in ("flaky", "fail") and i == 2:
+        # "flaky" fails track 2 only the first time (state file), "fail" fails it every time
+        state = os.environ.get("FAKE_STATE")
+        if not (scenario == "flaky" and state and Path(state).exists()):
+            if state:
+                Path(state).write_text("1")
+            say('[ERROR    19:00:02] Error downloading "Song 2": read timeout\n')
+            failed += 1
+            continue
     if scenario == "auth":
         say('[ERROR    19:00:01] Error downloading "Song 1": 401 Unauthorized, invalid cookies\n')
         time.sleep(30)
@@ -2516,7 +2569,7 @@ for i in range(1, tracks + 1):
         time.sleep(float(os.environ.get("FAKE_SLOW", "0.5")))
     if scenario == "crash":
         sys.exit(3)
-n_err = tracks if scenario == "rate_limit" else 0
+n_err = tracks if scenario == "rate_limit" else failed
 say(f"[INFO     19:00:59] Finished with {n_err} error(s)\n")
 ```
 
@@ -2542,7 +2595,8 @@ def env(tmp_path, monkeypatch, store):
     cfg = Config(db_path=":memory:", gamdl_cmd=[sys.executable, FAKE], extra_args=[],
                  staging_dir=str(tmp_path / "staging"), disk_path=str(tmp_path), cookies_path="",
                  catalog_path="", host="127.0.0.1", port=0, autostart=False)
-    store.put_settings({"low_disk_gb": 0})  # keep the disk gate out of tests that don't target it
+    # keep the disk gate and retries out of tests that don't target them
+    store.put_settings({"low_disk_gb": 0, "track_retries": 0})
     sleeps = []
 
     async def fake_sleep(s):
@@ -2563,6 +2617,8 @@ async def test_success_marks_done_with_output_and_findings(env):
     it = store.get_item(a)
     assert it["status"] == "done" and it["errors"] == 0
     assert it["output_path"].endswith("Album") and it["size_bytes"] >= 3000
+    assert it["codec"] == "unknown"  # the fake writes junk bytes, so ffprobe cannot identify them (or is absent)
+    assert "Lossy" not in (it["classification"] or "") and "unknown codec" in it["classification"]
     assert it["track_n"] == 3
     assert [t["status"] for t in store.list_tracks(a)] == ["done"] * 3
     assert store.count_tracks_since(0) == 3
@@ -2630,6 +2686,60 @@ async def test_crash_without_finished_is_error(env):
     await runner.step()
     it = store.get_item(a)
     assert it["status"] == "error" and "exit" in it["error_msg"]
+
+
+async def test_flaky_track_is_retried_after_backoff_then_succeeds(env, tmp_path):
+    runner, store, _, mp = env
+    store.put_settings({"track_retries": 2})
+    mp.setenv("FAKE_SCENARIO", "flaky")
+    mp.setenv("FAKE_STATE", str(tmp_path / "state"))
+    a = add(store, 1)
+    await runner.step()
+    it = store.get_item(a)
+    assert it["status"] == "queued" and it["attempts"] == 1 and it["not_before"] > NOW
+    assert "retry 1/2" in it["error_msg"]
+    assert store.get_flag("paused") is None  # a plain retry never pauses the queue
+    assert await runner.step() is False  # still backing off
+    runner._clock = lambda: NOW + 10_000
+    assert await runner.step() is True
+    it = store.get_item(a)
+    assert it["status"] == "done" and it["attempts"] == 1 and it["not_before"] is None
+
+
+async def test_retries_exhausted_becomes_error(env):
+    runner, store, _, mp = env
+    store.put_settings({"track_retries": 1})
+    mp.setenv("FAKE_SCENARIO", "fail")
+    a = add(store, 1)
+    await runner.step()
+    assert store.get_item(a)["status"] == "queued"
+    runner._clock = lambda: NOW + 10_000
+    await runner.step()
+    it = store.get_item(a)
+    assert it["status"] == "error" and it["attempts"] == 1 and it["errors"] == 1
+
+
+async def test_backoff_lets_other_items_run_but_still_one_at_a_time(env, tmp_path):
+    runner, store, _, mp = env
+    store.put_settings({"track_retries": 1})
+    mp.setenv("FAKE_SCENARIO", "flaky")
+    mp.setenv("FAKE_STATE", str(tmp_path / "state"))
+    a, b = add(store, 1), add(store, 2)
+    await runner.step()  # a fails once and backs off
+    await runner.step()  # b runs while a waits (state file now exists, so b succeeds)
+    assert store.get_item(b)["status"] == "done" and store.get_item(a)["status"] == "queued"
+
+
+async def test_rate_limit_is_never_retried(env):
+    runner, store, _, mp = env
+    store.put_settings({"track_retries": 2})
+    mp.setenv("FAKE_SCENARIO", "rate_limit")
+    mp.setenv("FAKE_TRACKS", "6")
+    a = add(store, 1)
+    await runner.step()
+    it = store.get_item(a)
+    assert it["attempts"] == 0 and it["not_before"] is None
+    assert store.get_banner()["kind"] == "rate_limited" and store.get_flag("paused") == "1"
 
 
 async def test_lock_held_requeues_and_shows_busy(env):
@@ -2828,7 +2938,7 @@ class Runner:
                 await self.resume()
             if self.store.get_flag("paused") == "1":
                 return False
-            item = self.store.next_queued()
+            item = self.store.next_queued(self._clock())  # skips items still backing off (not_before)
             if not item:
                 return False
             problem = self._preflight(item)
@@ -2931,7 +3041,7 @@ class Runner:
             self._on_line(iid, line, run)
         rc = await self.proc.wait()
         self.proc = None
-        self._finish(item, run, rc)
+        await self._finish(item, run, rc)
 
     def _on_line(self, iid, raw, run):
         for ev in parse_line(raw):
@@ -2985,7 +3095,21 @@ class Runner:
                           "speed": self.live.get("speed"), "delay_kind": self.live.get("delay_kind"),
                           "delay_until": self.live.get("delay_until")})
 
-    def _finish(self, item, run, rc):
+    def _fail(self, item, fields: dict, msg: str, errors=None):
+        """Track errors that are not rate-limit/auth: retry the album after a backoff, then give up.
+        gamdl skips files that already exist (overwrite=false), so a re-run only fetches what is missing."""
+        s = self.store.get_settings()
+        attempts = self.store.get_item(item["id"])["attempts"]
+        if attempts < s["track_retries"]:
+            lo, hi = parse_range(s["retry_backoff"])
+            fields.update(status="queued", attempts=attempts + 1, not_before=self._clock() + self._rand(lo, hi),
+                          error_msg=f"{msg}; retry {attempts + 1}/{s['track_retries']}")
+        else:
+            fields.update(status="error", error_msg=msg)
+        if errors is not None:
+            fields["errors"] = errors
+
+    async def _finish(self, item, run, rc):
         iid, now = item["id"], self._clock()
         fields: dict = {"finished_at": now}
         if run.busy:
@@ -2993,7 +3117,7 @@ class Runner:
             self._halt("busy", "another gamdl-safe instance holds the lock")
         elif self._cancel:
             fields.update(status="cancelled")
-        elif run.verdict:
+        elif run.verdict:  # 429/403/auth always wins: never retried automatically
             fields.update(status="queued", error_msg=run.verdict.reason)
             self._halt(run.verdict.kind, run.verdict.reason)
         elif run.paused_stop:
@@ -3001,13 +3125,13 @@ class Runner:
         elif rc == 0 and run.finished is not None:
             errors = max(run.errors, run.finished)
             if errors == 0:
-                fields.update(self._describe_output(item))
-                fields.update(status="done", errors=0)
+                fields.update(await asyncio.to_thread(self._describe_output, item))
+                fields.update(status="done", errors=0, not_before=None)
                 self.guard.reset()
             else:
-                fields.update(status="error", errors=errors, error_msg=f"finished with {errors} error(s)")
+                self._fail(item, fields, f"finished with {errors} error(s)", errors)
         else:
-            fields.update(status="error", error_msg=f"gamdl-safe exited with code {rc} before finishing")
+            self._fail(item, fields, f"gamdl-safe exited with code {rc} before finishing")
         self.store.update_item(iid, **fields)
         self.current_id, self.live = None, {}
         self._cancel = self._pause_after_track = False
@@ -3022,11 +3146,15 @@ class Runner:
             return {}
         rules = checker.load_rules()
         findings: list = []
-        for d in dirs:
+        codec, classification = "unknown", ""
+        for d in dirs:  # runs in a worker thread (asyncio.to_thread): ffprobe is blocking
             for f in checker.check_album(d, cur["track_n"] or cur["expected_tracks"], rules):
                 findings.append(f"{d.name}: {f}")
+            codec, classification, codec_findings = checker.probe_album(d, rules)
+            findings.extend(f"{d.name}: {f}" for f in codec_findings)
         path = str(dirs[0]) if len(dirs) == 1 else str(dirs[0].parent)
-        return {"output_path": path, "size_bytes": checker.dir_size(dirs), "findings": json.dumps(findings)}
+        return {"output_path": path, "size_bytes": checker.dir_size(dirs), "findings": json.dumps(findings),
+                "codec": codec, "classification": classification}
 ```
 Note for the implementer: `Runner.step` must remain the only entry point that starts processes; do not add any other `create_subprocess_exec` call.
 
