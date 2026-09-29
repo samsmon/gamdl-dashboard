@@ -32,6 +32,34 @@ IDM: queue table, per-album + per-track progress bars, speed, status, pause/resu
 - Output layout: `<output>/<Artist>/<Album>/NN Title.m4a` + `.lrc` + `Cover.jpg`. Staging only; files are
   moved into `Lossless/`/`Lossy/` manually per `docs/music-standards.md` (artist `Romaji (Kanji) ~` etc).
 
+## Post-download classification (decision 2026-09-29)
+No AAC->FLAC conversion. AAC `.m4a` goes to `Lossy/` tagged `[AAC 256k]`; `alac` `.m4a` is valid for `Lossless/`
+(decide via `ffprobe` codec, not extension). See `docs/music-standards.md` ("Apple Music (`gamdl`) Ingestion").
+Optional dashboard feature: show detected codec per finished album and a "move to Lossy/" helper that follows the naming standard.
+
+## Feature: "already in library?" pre-check (decided 2026-09-30)
+Before a URL enters the queue, the dashboard checks whether the album is already in the library and skips/flags it.
+gamdl can't do this itself (`--database-path` only knows what gamdl downloaded, not the existing library).
+
+Data available (READ-ONLY, never write to it), on `/mnt/hdd-backup/music/`:
+- `metadata.csv`: Title, Artist, Album, Album Artist, Year, Track Number, Total Tracks, Codec, Duration, Path... Best source for matching.
+- `catalog.sqlite` (`tracks` table, ~25k rows): only `relative_path, filename, category, format, size_bytes, is_lossless`. No artist/album columns;
+  useful for the lossless/lossy split and path lookup.
+- Old rips have no Apple IDs in tags, so ID-based matching is not possible for existing files.
+
+Matching challenge: library folders use `Romaji (Kanji) ~` for artists and pure album titles (see `docs/music-standards.md`), while
+Apple with storefront `jp` now returns pure Japanese names (e.g. `ロクデナシ`, `溜息`). Plain string equality will miss a lot.
+Use fuzzy scoring instead: normalized title (NFKC, casefold, strip punctuation/brackets/format tags), track count, total duration
+(+/- a few seconds), and per-track title overlap. Output a confidence, not a boolean.
+
+Statuses: `in library (lossless)`, `in library (lossy)`, `similar (needs confirmation)`, `new`.
+Rules:
+1. `in library (lossless)` -> skip by default.
+2. Only a lossy copy exists and the download would be AAC -> flag, do not auto-skip.
+3. Always provide a "download anyway" override (matching can be wrong).
+4. Also check the staging folder `_gamdl-incoming/` to avoid re-downloading albums not yet filed.
+5. gamdl's default fetch is the `/jp/` storefront via `gamdl-safe` (env `GAMDL_STOREFRONT`); fetch metadata for the check from the same storefront so names line up.
+
 ## Log format to parse (from a real run, ANSI colors stripped)
 ```
 [INFO     19:03:47] [Track   1/17 ] Downloading "The City Where Whales Fall"
