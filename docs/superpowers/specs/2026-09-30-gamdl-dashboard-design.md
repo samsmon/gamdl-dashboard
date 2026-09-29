@@ -124,17 +124,37 @@ https://music.apple.com/id/album/frozen-flower/1851922484
 - The `/jp/` rule is a setting (`storefront`, default `jp`) so it lives in one place.
 
 ### 8.2 Preview before queueing
-Pasted URLs are first resolved to a preview: title, artist, track count, release year. Nothing is queued until the user confirms the preview, and each row can be unchecked. Artist and playlist URLs show their expanded size, with a warning above a configurable track count (default 100). Previews are unauthenticated public-page fetches (no cookies, never the Apple account), so they use their own lock and a random 3-8 s delay between requests rather than the download runner's lock; this keeps the UI responsive while a download runs. If gamdl has no download-free metadata mode, the fallback is a direct Apple Music web page fetch of the public page title only, with no cookies, at most one request per URL with a random delay; if neither works, preview shows the normalized URL only and says so. This is verified in the first plan task, before anything depends on it.
+Pasted URLs are first resolved to a preview: title, artist, track count, release year, and where the page provides them the track titles and per-track durations (needed by 8.4). The page is fetched from the same storefront the download uses (`/jp/`, with `Accept-Language: ja-JP`), so names come back in the original language exactly as gamdl will name the files. Nothing is queued until the user confirms the preview, and each row can be unchecked. Artist and playlist URLs show their expanded size, with a warning above a configurable track count (default 100). Previews are unauthenticated public-page fetches (no cookies, never the Apple account), so they use their own lock and a random 3-8 s delay between requests rather than the download runner's lock; this keeps the UI responsive while a download runs. If gamdl has no download-free metadata mode, the fallback is a direct Apple Music web page fetch of the public page title only, with no cookies, at most one request per URL with a random delay; if neither works, preview shows the normalized URL only and says so. This is verified in the first plan task, before anything depends on it.
 
 ### 8.3 Download cap
 Setting `max_tracks_per_24h` (default 150, 0 = off). The store keeps a timestamped log of finished tracks; when the rolling 24 h count reaches the cap, the queue pauses with banner `cap_reached` and shows the time when the oldest counted track ages out. It resumes automatically only when the user has enabled `auto_resume_after_cap`; default is manual.
 
-### 8.4 Library duplicate check (catalog.sqlite)
-Source: `music/catalog.sqlite` (server path `/mnt/hdd-backup/music/catalog.sqlite`, SMB `\\192.168.18.225\homelab\hdd-backup\music\catalog.sqlite`). It is opened **read-only** (`mode=ro`, never written) and only when needed; the path is a setting. Observed schema: one table `tracks(id, relative_path UNIQUE, filename, category, format, size_bytes, is_lossless)`, ~25k rows, `relative_path` shaped `Lossless|Lossy/<Category>/<Artist ~>/<Album>/NN. Title.<ext>`. It holds no Apple IDs.
-- Matching is therefore by names: normalize (NFKC, casefold, strip punctuation and the `~` suffix, keep both romaji and kanji parts) the preview's artist + album, then compare against the artist and album path segments; report `exact`, `likely` (fuzzy, with the matched path) or `none`. Also compare track count and whether the existing files are lossless.
-- Shown in the preview as "already in library: Lossless/J-Pop/... (12 tracks, FLAC)". Warning only: the user decides. Because the dashboard downloads AAC, an existing lossless match is highlighted as "you already have a better copy".
-- If the catalog is missing, stale or unreadable, the check shows "catalog unavailable" and never blocks queueing. The catalog is a file on a NAS that is rebuilt elsewhere, so it is treated as possibly out of date, and its mtime is shown.
-- Staging folders (`_gamdl-incoming`) are also checked directly on disk by directory name, since they are not in the catalog.
+### 8.4 "Already in library?" pre-check
+Runs for every previewed URL before it can be queued. **Read-only on everything**: `metadata.csv` and `catalog.sqlite` are never written.
+
+**Sources** (server: `/mnt/hdd-backup/music/`; SMB: `\192.168.18.225\homelab\hdd-backup\music\`; paths are settings):
+- `metadata.csv` (primary, ~12 MB, loaded into memory, reloaded when its mtime changes). Columns used: `Title, Artist, Album, Album Artist, Year, Track Number, Total Tracks, Codec, Duration, Path`. `Codec` is a MIME-like value (`audio/flac`, ...); `Duration` is seconds (float). `Path` holds old Windows paths (`E:/Music\...`), which do NOT correspond to `catalog.sqlite` `relative_path`, so nothing is joined on path. Tracks are grouped into album records by their containing directory.
+- `catalog.sqlite` (fallback only): if `metadata.csv` is missing or unreadable, a name-only match over `tracks.relative_path` (`Lossless|Lossy/<Category>/<Artist ~>/<Album>/NN. Title.<ext>`) is used and can only produce `similar`, never `in library`, because it has no durations or track counts.
+- Staging `_gamdl-incoming/`: directory-name match (artist/album folders) plus file count, reported as `in staging`.
+- Old rips carry no Apple IDs, so ID matching is impossible. Because storefront `jp` returns pure Japanese names while library artist folders are `Romaji (Kanji) ~`, artist is only a bonus signal.
+
+**Confidence score** (0.0-1.0) from weighted components, missing components dropped and the rest renormalized:
+| component | weight | rule |
+|---|---|---|
+| album title | 0.35 | normalized equality = 1.0, else similarity ratio (NFKC, casefold, strip punctuation, `[...]` format tags, trailing `- Single`/`- EP`) |
+| total duration | 0.25 | 1.0 within 3 s, falling linearly to 0 at 5 % difference |
+| per-track title overlap | 0.25 | intersection / larger set of normalized track titles |
+| track count | 0.15 | 1.0 when equal, else `1 - |diff| / max` |
+An artist-name match (any variant of romaji, kanji or bracketed part) adds 0.05 (cap 1.0). **Evidence cap:** if fewer than 3 components are available (for example the page gave no durations or track list), the score is capped at 0.80, so a title-only match can never reach `in library`.
+
+**Statuses** (thresholds are settings: `library_exact` default 0.85, `library_similar` default 0.55). Among records scoring within 0.05 of the best, a lossless one wins:
+| status | condition | default in the preview |
+|---|---|---|
+| `in library (lossless)` | score >= exact, record lossless (codec flac/alac/wav/aiff/ape/...) | unchecked, skipped |
+| `in library (lossy)` | score >= exact, record lossy | checked but flagged (the AAC download is not an upgrade) |
+| `similar (needs confirmation)` | similar <= score < exact, or `in staging`, or catalog-only match | unchecked |
+| `new` | below similar | checked |
+Every row has a **"download anyway"** button. Enforcement is server-side: `POST /api/queue` refuses an item whose cached preview status is `in library (lossless)`, `similar` or `in staging` unless the request says `force: true`, so the client cannot skip the rule by accident. Each row shows the confidence, the matched album, its path hint and the codec. The result never blocks queueing when a source is missing: the row shows "library data unavailable" and the row stays checkable.
 
 ### 8.5 Post-download checker
 After an item reaches `done`, `checker.py` inspects the output folder (read-only) and lists problems against `docs/music-standards.md` conventions visible in the catalog: artist folder should follow `Romaji (Kanji) ~`, missing `Cover.jpg`, missing `.lrc` when lyrics are on, track file count differing from `Track n/N`, zero-byte files, disallowed characters. Findings appear in the Completed tab as a plain list per album. It never renames or moves anything. The rule set is a small data file in the repo so it can be changed without touching code; rules are limited to what the catalog and the brief demonstrate. If the real `music-standards.md` is provided, the rules are aligned to it in the plan.
