@@ -23,6 +23,12 @@
 - No deployment, no SSH, no writes to homelab-ops or to the server. No real Apple/network calls in tests.
 - Frontend: greys only, no accent color, no gradients/shadows/emoji/icons-in-circles, monospace system font, square corners, status by glyph+fill pattern (never hue). All server text is inserted with `textContent` (never `innerHTML`).
 - Default bind `0.0.0.0:8110` via `GAMDL_DASH_HOST` / `GAMDL_DASH_PORT`.
+- Setting `storefront` may be empty (= no rewrite, passed to the wrapper as an empty `GAMDL_STOREFRONT`, which disables its rewrite).
+- Library check (spec 8.4) is read-only on `metadata.csv` and `catalog.sqlite`. `metadata.csv` `Path` values are old Windows paths and are never joined to `catalog.sqlite`. Score weights: title 0.35, duration 0.25, track overlap 0.25, track count 0.15, artist bonus 0.05; fewer than 3 components caps the score at 0.80; thresholds `library_exact` 0.85 / `library_similar` 0.55.
+- Retry (spec 8.9): album-level re-run for non-rate-limit, non-auth errors, `track_retries` default 2, `retry_backoff` default `120-300` s (floor 30). The guard verdict always wins; no retry after 429/403/auth.
+- Codec comes from `ffprobe`, never the extension. No file is ever moved, renamed or converted.
+- Albums with more than one track get a collapsed-by-default inline track list; single-track items get none (spec 8.10).
+- Git: commit as Maja, plain messages, **no Co-Authored-By trailer, no Claude attribution**.
 
 ## Review Focus
 
@@ -30,7 +36,9 @@
 2. A `\r`-terminated yt-dlp progress line split across two reads must still parse (Task 3).
 3. A song titled "Room 403" or "429 Days" in a normal or quoted log line must NOT count as a rate-limit error (Task 3, Task 4).
 4. Killing the dashboard mid-download: on restart the item returns to `queued`, the queue starts paused, and nothing re-runs by itself (Tasks 5, 10).
-5. `catalog.sqlite` missing, locked or malformed: preview shows "catalog unavailable" and never blocks queueing (Task 7).
+5. `metadata.csv` / `catalog.sqlite` missing, locked, malformed or with blank durations: the row shows "library data unavailable" or a capped score, and never blocks queueing; a title-only match must never reach `in library` (Tasks 7, 7b).
+6b. A non-rate-limit track failure (stall/timeout) is retried after backoff and then succeeds; a 429 is never retried automatically (Task 10).
+6c. A single-track download shows no expand toggle; an album does, collapsed by default (Task 12).
 6. Cancel while paused, pause while idle, and resume after a rate-limit pause must not leave a stuck `downloading` item or a stale banner (Task 10).
 
 ---
@@ -222,6 +230,10 @@ def test_uppercase_storefront_and_whitespace():
 
 def test_keep_original_storefront_when_none():
     assert normalize(ID, storefront=None).normalized == "https://music.apple.com/id/album/1851922484"
+
+
+def test_empty_storefront_disables_rewrite():
+    assert normalize(ID, storefront="").normalized == "https://music.apple.com/id/album/1851922484"
 
 
 def test_song_in_album_keeps_track_id():
@@ -646,7 +658,7 @@ def test_reset():
 ```python
 import pytest
 
-from app.settings import DEFAULTS, parse_range, validate
+from app.settings import DEFAULTS, check_merged, parse_range, validate
 
 
 def test_defaults_present():
@@ -655,6 +667,15 @@ def test_defaults_present():
     assert DEFAULTS["error_threshold"] == 3
     assert DEFAULTS["max_tracks_per_24h"] == 150
     assert DEFAULTS["storefront"] == "jp"
+    assert DEFAULTS["library_exact"] == 0.85 and DEFAULTS["library_similar"] == 0.55
+    assert DEFAULTS["track_retries"] == 2 and DEFAULTS["retry_backoff"] == "120-300"
+
+
+def test_empty_storefront_allowed_and_cross_field_rule():
+    assert validate({"storefront": ""}) == {"storefront": ""}
+    with pytest.raises(ValueError):
+        check_merged({**DEFAULTS, "library_similar": 0.9, "library_exact": 0.8})
+    check_merged(DEFAULTS)
 
 
 def test_parse_range():
@@ -669,6 +690,9 @@ def test_parse_range():
     {"error_threshold": 0},
     {"storefront": "japan"},
     {"max_tracks_per_24h": -1},
+    {"retry_backoff": "10-20"},      # below 30 s floor
+    {"track_retries": 99},
+    {"library_exact": 1.5},
     {"unknown_key": 1},
 ])
 def test_rejects(patch):
@@ -736,6 +760,10 @@ DEFAULTS = {
     "auto_resume_after_cap": False,
     "storefront": "jp",
     "preview_max_tracks": 100,
+    "library_exact": 0.85,
+    "library_similar": 0.55,
+    "track_retries": 2,
+    "retry_backoff": "120-300",
 }
 
 
@@ -780,12 +808,37 @@ def _bool(key: str):
 
 def _storefront(v):
     v = str(v).strip().lower()
-    if not re.fullmatch(r"[a-z]{2}", v):
-        raise ValueError("storefront: must be a 2-letter code")
+    if v and not re.fullmatch(r"[a-z]{2}", v):
+        raise ValueError("storefront: must be a 2-letter code, or empty to disable the rewrite")
     return v
 
 
+def _score(key: str):
+    def check(v):
+        try:
+            n = float(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"{key}: must be a number")
+        if not 0.0 < n <= 1.0:
+            raise ValueError(f"{key}: must be between 0 and 1")
+        return n
+    return check
+
+
+RETRY_FLOOR = 30.0
+
+
+def check_merged(s: dict) -> None:
+    """Cross-field rules, applied to the full settings dict after a patch is merged."""
+    if not s["library_similar"] < s["library_exact"]:
+        raise ValueError("library_similar must be lower than library_exact")
+
+
 _RULES = {
+    "library_exact": _score("library_exact"),
+    "library_similar": _score("library_similar"),
+    "track_retries": _int("track_retries", 0, 10),
+    "retry_backoff": _range("retry_backoff", RETRY_FLOOR),
     "track_delay": _range("track_delay", TRACK_FLOOR),
     "album_delay": _range("album_delay", ALBUM_FLOOR),
     "error_threshold": _int("error_threshold", 1, 20),
@@ -824,7 +877,7 @@ git add -A && git commit -m "feat: rate-limit guard and validated settings"
 **Interfaces:**
 - Consumes: `app.settings.DEFAULTS`, `app.settings.validate`.
 - Produces `class Store(path:str)`, all methods synchronous and thread-safe (one lock):
-  - Items: `add_item(url, original_url, kind, ext_id, track_id=None, title=None, artist=None, expected_tracks=None) -> int`, `get_item(id)->dict|None`, `list_items()->list[dict]`, `find_by_key(kind, ext_id, track_id)->dict|None` (ignores `cancelled`), `update_item(id, **fields)` (whitelisted columns), `next_queued()->dict|None`, `reorder(ids:list[int])`, `remove_item(id)`, `recover_after_crash()->int`.
+  - Items: `add_item(url, original_url, kind, ext_id, track_id=None, title=None, artist=None, expected_tracks=None) -> int`, `get_item(id)->dict|None`, `list_items()->list[dict]`, `find_by_key(kind, ext_id, track_id)->dict|None` (ignores `cancelled`), `update_item(id, **fields)` (whitelisted columns), `next_queued(now:float|None=None)->dict|None` (only items with `not_before` empty or <= now), `reorder(ids:list[int])`, `remove_item(id)`, `recover_after_crash()->int`.
   - Item columns: `id,url,original_url,kind,ext_id,track_id,status,position,title,artist,expected_tracks,url_i,url_n,track_i,track_n,current_title,errors,output_path,size_bytes,error_msg,findings,created_at,started_at,finished_at`. `findings` is a JSON string (list of str) or `NULL`.
   - Tracks: `clear_tracks(item_id)`, `upsert_track(item_id, idx, title, status, reason=None)`, `list_tracks(item_id)->list[dict]`.
   - Log: `add_log(item_id, level, text, ts)`, `tail_log(limit=200)->list[dict]` (oldest first; capped to 2000 rows stored).
@@ -863,6 +916,23 @@ def test_add_list_order_and_next(store):
     assert store.next_queued()["id"] == a
     store.update_item(a, status="done")
     assert store.next_queued()["id"] == b
+
+
+def test_next_queued_honors_not_before(store):
+    a, b = add(store, 1), add(store, 2)
+    store.update_item(a, not_before=5000.0, attempts=1)
+    assert store.next_queued(now=1000.0)["id"] == b      # a is backing off, b goes first
+    store.update_item(b, status="done")
+    assert store.next_queued(now=1000.0) is None
+    assert store.next_queued(now=6000.0)["id"] == a
+
+
+def test_new_columns_default(store):
+    a = add(store, 1)
+    it = store.get_item(a)
+    assert it["attempts"] == 0 and it["not_before"] is None and it["codec"] is None
+    store.update_item(a, codec="aac 256k", classification="Lossy/ [AAC 256k]", library_status="new")
+    assert store.get_item(a)["classification"] == "Lossy/ [AAC 256k]"
 
 
 def test_reorder(store):
@@ -964,6 +1034,7 @@ _ITEM_COLS = {
     "url", "original_url", "kind", "ext_id", "track_id", "status", "position", "title", "artist",
     "expected_tracks", "url_i", "url_n", "track_i", "track_n", "current_title", "errors",
     "output_path", "size_bytes", "error_msg", "findings", "created_at", "started_at", "finished_at",
+    "attempts", "not_before", "codec", "classification", "library_status",
 }
 
 _SCHEMA = """
@@ -973,7 +1044,8 @@ CREATE TABLE IF NOT EXISTS items(
   title TEXT, artist TEXT, expected_tracks INTEGER, url_i INTEGER, url_n INTEGER,
   track_i INTEGER, track_n INTEGER, current_title TEXT, errors INTEGER NOT NULL DEFAULT 0,
   output_path TEXT, size_bytes INTEGER, error_msg TEXT, findings TEXT,
-  created_at REAL, started_at REAL, finished_at REAL);
+  created_at REAL, started_at REAL, finished_at REAL,
+  attempts INTEGER NOT NULL DEFAULT 0, not_before REAL, codec TEXT, classification TEXT, library_status TEXT);
 CREATE TABLE IF NOT EXISTS tracks(
   item_id INTEGER NOT NULL, idx INTEGER NOT NULL, title TEXT, status TEXT, reason TEXT,
   PRIMARY KEY(item_id, idx));
@@ -1039,8 +1111,11 @@ class Store:
         sets = ",".join(f"{k}=?" for k in fields)
         self._exec(f"UPDATE items SET {sets} WHERE id=?", (*fields.values(), item_id))
 
-    def next_queued(self):
-        return self._one("SELECT * FROM items WHERE status='queued' ORDER BY position, id LIMIT 1")
+    def next_queued(self, now=None):
+        now = time.time() if now is None else now
+        return self._one(
+            "SELECT * FROM items WHERE status='queued' AND (not_before IS NULL OR not_before<=?)"
+            " ORDER BY position, id LIMIT 1", (now,))
 
     def reorder(self, ids):
         with self._lock:
@@ -1107,6 +1182,7 @@ class Store:
     def put_settings(self, patch):
         clean = st.validate(patch)
         merged = {**self.get_settings(), **clean}
+        st.check_merged(merged)
         self.set_flag("settings", json.dumps(merged))
         return merged
 
@@ -1303,7 +1379,7 @@ git add -A && git commit -m "feat: cookie expiry, disk and size forecast helpers
 
 ---
 
-### Task 7: Library catalog match (read-only)
+### Task 7: Catalog fallback and staging match (read-only)
 
 **Files:**
 - Create: `app/catalog.py`, `tests/test_catalog.py`
@@ -1536,6 +1612,314 @@ git add -A && git commit -m "feat: read-only catalog and staging duplicate match
 
 ---
 
+### Task 7b: Library match scoring from `metadata.csv` (read-only)
+
+**Files:**
+- Create: `app/library.py`, `tests/test_library.py`
+
+**Interfaces:**
+- Consumes: `app.catalog.artist_variants(s:str) -> set[str]` (Task 7).
+- Produces:
+  - `norm_title(s:str) -> str` (NFKC, casefold, drop `[...]` tags and a trailing `- Single`/`- EP`, strip punctuation, collapse spaces).
+  - `is_lossless_codec(codec:str) -> bool` (true when the codec string contains flac, alac, wav, wave, pcm, aiff, ape, wavpack or tta; `audio/mpeg`, `audio/mp4` and unknown are lossy).
+  - `@dataclass RemoteAlbum(title:str, artist:str, tracks:int|None=None, track_titles:list=[], durations:list=[])` (durations in seconds, `None` for unknown).
+  - `@dataclass LibraryMatch(status:str, confidence:float, album:str, path:str, lossless:bool|None, reasons:list)`; `status` in `in_library_lossless, in_library_lossy, similar, new, unknown, unavailable`.
+  - `class Library(path:str)`: `match(remote:RemoteAlbum, exact:float=0.85, similar:float=0.55) -> LibraryMatch`; `mtime()->float|None`. Never raises: OS/CSV/decode errors give `status="unavailable"`; an empty remote (no title and no track titles) gives `unknown`.
+- Scoring (spec section 8.4): title 0.35, duration 0.25, overlap 0.25, count 0.15, artist bonus +0.05 (cap 1.0), renormalized over available components, capped at 0.80 when fewer than 3 components exist. Among records within 0.05 of the best score, a lossless record wins.
+
+- [ ] **Step 1: Write the failing tests** `tests/test_library.py`
+```python
+import csv
+import os
+
+from app.library import Library, RemoteAlbum, is_lossless_codec, norm_title
+
+HEADER = ["Title", "Artist", "Album", "Album Artist", "Track Number", "Total Tracks", "Codec", "Duration", "Path"]
+
+
+def write_csv(path, rows):
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(HEADER)
+        w.writerows(rows)
+
+
+def album_rows(album, artist, titles, durs, codec, folder):
+    return [[t, artist, album, artist, i + 1, len(titles), codec, d, f"E:/Music\\{folder}\\{i + 1:02d} {t}.x"]
+            for i, (t, d) in enumerate(zip(titles, durs))]
+
+
+TITLES = ["心の奥", "草々不一", "溜息"]
+DURS = [200.0, 180.5, 240.0]
+
+
+def remote(**kw):
+    base = dict(title="溜息", artist="ロクデナシ", tracks=3, track_titles=TITLES, durations=DURS)
+    base.update(kw)
+    return RemoteAlbum(**base)
+
+
+def lib(tmp_path, *groups):
+    p = str(tmp_path / "metadata.csv")
+    write_csv(p, [r for g in groups for r in g])
+    return Library(p)
+
+
+def test_norm_title_and_codec():
+    assert norm_title("Party!! - Single") == "party"
+    assert norm_title("Song [WEB-FLAC 24bit／44.1kHz]") == "song"
+    assert norm_title("ＡＢＣ　Ｄ") == "abc d"
+    assert is_lossless_codec("audio/flac") and is_lossless_codec("audio/x-wav") and is_lossless_codec("alac")
+    assert not is_lossless_codec("audio/mpeg") and not is_lossless_codec("")
+
+
+def test_lossless_copy_is_in_library_lossless(tmp_path):
+    L = lib(tmp_path, album_rows("溜息", "Rokudenashi (ロクデナシ) ~", TITLES, DURS, "audio/flac", "Lossless\\J-Pop\\A\\溜息"))
+    m = L.match(remote())
+    assert m.status == "in_library_lossless" and m.confidence >= 0.85 and m.lossless is True
+    assert m.album == "溜息"
+
+
+def test_lossy_only_copy_is_flagged_lossy(tmp_path):
+    L = lib(tmp_path, album_rows("溜息", "x", TITLES, DURS, "audio/mpeg", "Lossy\\A\\溜息"))
+    assert L.match(remote()).status == "in_library_lossy"
+
+
+def test_lossless_wins_over_near_duplicate_lossy(tmp_path):
+    L = lib(tmp_path,
+            album_rows("溜息", "x", TITLES, DURS, "audio/mpeg", "Lossy\\A\\溜息"),
+            album_rows("溜息", "x", TITLES, DURS, "audio/flac", "Lossless\\A\\溜息"))
+    assert L.match(remote()).status == "in_library_lossless"
+
+
+def test_title_only_evidence_can_never_be_in_library(tmp_path):
+    L = lib(tmp_path, album_rows("溜息", "x", TITLES, DURS, "audio/flac", "Lossless\\A\\溜息"))
+    m = L.match(RemoteAlbum(title="溜息", artist=""))
+    assert m.status == "similar" and m.confidence <= 0.80
+
+
+def test_different_album_is_new(tmp_path):
+    L = lib(tmp_path, album_rows("Other", "x", ["a", "b"], [100.0, 90.0], "audio/flac", "Lossless\\A\\Other"))
+    assert L.match(remote()).status == "new"
+
+
+def test_renamed_album_with_same_tracks_is_similar(tmp_path):
+    L = lib(tmp_path, album_rows("Tameiki (Romaji title)", "x", TITLES, DURS, "audio/flac", "Lossless\\A\\Tameiki"))
+    m = L.match(remote())
+    assert m.status == "similar", m
+
+
+def test_duration_mismatch_lowers_score(tmp_path):
+    off = lib(tmp_path, album_rows("溜息", "x", TITLES, [100.0, 100.0, 100.0], "audio/flac", "Lossless\\A\\溜息"))
+    conf_off = off.match(remote()).confidence
+    same = lib(tmp_path, album_rows("溜息", "x", TITLES, DURS, "audio/flac", "Lossless\\A\\溜息"))
+    assert conf_off < same.match(remote()).confidence
+
+
+def test_blank_remote_durations_are_ignored_not_fatal(tmp_path):
+    L = lib(tmp_path, album_rows("溜息", "x", TITLES, DURS, "audio/flac", "Lossless\\A\\溜息"))
+    m = L.match(remote(durations=[None, None, None]))
+    assert m.status in ("in_library_lossless", "similar") and m.confidence > 0.5
+
+
+def test_artist_bonus_from_kanji_variant(tmp_path):
+    rows = album_rows("溜息", "Rokudenashi (ロクデナシ) ~", TITLES, [100.0, 100.0, 100.0], "audio/flac", "L\\A\\溜息")
+    with_artist = lib(tmp_path, rows).match(remote(artist="ロクデナシ")).confidence
+    without = lib(tmp_path, rows).match(remote(artist="Someone Else")).confidence
+    assert with_artist > without
+
+
+def test_unknown_when_nothing_to_compare(tmp_path):
+    L = lib(tmp_path, album_rows("a", "x", ["t"], [1.0], "audio/flac", "L\\A\\a"))
+    assert L.match(RemoteAlbum(title="", artist="")).status == "unknown"
+
+
+def test_missing_and_broken_files_are_unavailable(tmp_path):
+    assert Library(str(tmp_path / "none.csv")).match(remote()).status == "unavailable"
+    bad = tmp_path / "bad.csv"
+    bad.write_bytes(b"\x80\x81\x82\xff\xfe")
+    assert Library(str(bad)).match(remote()).status == "unavailable"
+
+
+def test_reload_when_file_changes(tmp_path):
+    p = str(tmp_path / "m.csv")
+    write_csv(p, [])
+    L = Library(p)
+    assert L.match(remote()).status == "new"
+    write_csv(p, album_rows("溜息", "x", TITLES, DURS, "audio/flac", "L\\A\\溜息"))
+    st = os.stat(p)
+    os.utime(p, (st.st_atime, st.st_mtime + 5))
+    assert L.match(remote()).status == "in_library_lossless"
+
+
+def test_bad_duration_cells_do_not_crash(tmp_path):
+    rows = album_rows("溜息", "x", TITLES, ["", "abc", "240"], "audio/flac", "L\\A\\溜息")
+    assert lib(tmp_path, rows).match(remote()).status in ("similar", "in_library_lossless", "new")
+```
+
+- [ ] **Step 2: Run, expect FAIL** (`ModuleNotFoundError: app.library`)
+
+Run: `.venv/Scripts/python -m pytest tests/test_library.py -v`
+
+- [ ] **Step 3: Implement** `app/library.py`
+```python
+import csv
+import difflib
+import os
+import re
+import unicodedata
+from dataclasses import dataclass, field
+
+from app.catalog import artist_variants
+
+LOSSLESS = ("flac", "alac", "wavpack", "wave", "wav", "pcm", "aiff", "ape", "tta")
+_TAGS = re.compile(r"\[[^\]]*\]")
+_SUFFIX = re.compile(r"\s*-\s*(single|ep)\s*$", re.I)
+W_TITLE, W_DURATION, W_OVERLAP, W_COUNT, ARTIST_BONUS = 0.35, 0.25, 0.25, 0.15, 0.05
+THIN_EVIDENCE_CAP = 0.80
+
+
+def norm_title(s: str) -> str:
+    s = unicodedata.normalize("NFKC", s or "").casefold()
+    s = _TAGS.sub(" ", s)
+    s = _SUFFIX.sub("", s)
+    s = re.sub(r"[^\w]+", " ", s)
+    return " ".join(s.split())
+
+
+def is_lossless_codec(codec: str) -> bool:
+    c = (codec or "").lower()
+    return any(t in c for t in LOSSLESS)
+
+
+@dataclass
+class RemoteAlbum:
+    title: str
+    artist: str
+    tracks: int | None = None
+    track_titles: list = field(default_factory=list)
+    durations: list = field(default_factory=list)
+
+
+@dataclass
+class LibraryMatch:
+    status: str
+    confidence: float = 0.0
+    album: str = ""
+    path: str = ""
+    lossless: bool | None = None
+    reasons: list = field(default_factory=list)
+
+
+@dataclass
+class _Rec:
+    dir: str
+    title: str
+    artists: set
+    tracks: set
+    count: int
+    duration: float
+    lossless: bool
+
+
+def _float(v) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+class Library:
+    def __init__(self, path: str):
+        self.path = path
+        self._mtime = None
+        self._recs: list = []
+
+    def mtime(self):
+        try:
+            return os.stat(self.path).st_mtime
+        except OSError:
+            return None
+
+    def _load(self):
+        m = os.stat(self.path).st_mtime
+        if m == self._mtime:
+            return
+        groups: dict = {}
+        with open(self.path, newline="", encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                p = (row.get("Path") or "").replace("/", "\\")
+                d = p.rsplit("\\", 1)[0] if "\\" in p else f"?{row.get('Album')}"
+                g = groups.setdefault(d, {"title": row.get("Album") or "", "artists": set(), "tracks": set(),
+                                          "n": 0, "dur": 0.0, "lossless": True})
+                g["artists"] |= artist_variants(row.get("Album Artist") or "") | artist_variants(row.get("Artist") or "")
+                g["tracks"].add(norm_title(row.get("Title") or ""))
+                g["n"] += 1
+                g["dur"] += _float(row.get("Duration"))
+                g["lossless"] = g["lossless"] and is_lossless_codec(row.get("Codec") or "")
+        self._recs = [_Rec(d, norm_title(g["title"]), g["artists"], g["tracks"] - {""}, g["n"], g["dur"], g["lossless"])
+                      for d, g in groups.items()]
+        self._mtime = m
+
+    @staticmethod
+    def _score(rec: _Rec, r: RemoteAlbum, title: str, titles: set) -> float:
+        comps = []
+        if title and rec.title:
+            if title == rec.title:
+                ratio = 1.0
+            else:
+                sm = difflib.SequenceMatcher(None, title, rec.title)
+                ratio = sm.ratio() if sm.quick_ratio() >= 0.5 else 0.0
+            comps.append((W_TITLE, ratio))
+        if r.tracks:
+            comps.append((W_COUNT, 1 - abs(r.tracks - rec.count) / max(r.tracks, rec.count)))
+        if r.durations and all(d is not None for d in r.durations) and rec.duration > 0:
+            total = sum(r.durations)
+            diff = abs(total - rec.duration)
+            comps.append((W_DURATION, 1.0 if diff <= 3 else max(0.0, 1 - (diff - 3) / (0.05 * max(total, rec.duration)))))
+        if titles and rec.tracks:
+            comps.append((W_OVERLAP, len(titles & rec.tracks) / max(len(titles), len(rec.tracks))))
+        if not comps:
+            return 0.0
+        score = sum(w * v for w, v in comps) / sum(w for w, _ in comps)
+        if r.artist and (artist_variants(r.artist) & rec.artists):
+            score = min(1.0, score + ARTIST_BONUS)
+        if len(comps) < 3:
+            score = min(score, THIN_EVIDENCE_CAP)
+        return score
+
+    def match(self, r: RemoteAlbum, exact: float = 0.85, similar: float = 0.55) -> LibraryMatch:
+        try:
+            self._load()
+        except (OSError, csv.Error, UnicodeDecodeError) as e:
+            return LibraryMatch("unavailable", reasons=[str(e)])
+        title = norm_title(r.title)
+        titles = {norm_title(t) for t in r.track_titles} - {""}
+        if not title and not titles:
+            return LibraryMatch("unknown", reasons=["no album data from the Apple page"])
+        scored = sorted(((self._score(rec, r, title, titles), rec) for rec in self._recs), key=lambda x: -x[0])
+        if not scored:
+            return LibraryMatch("new")
+        best, rec = scored[0]
+        near = [x for s, x in scored if s >= best - 0.05]
+        chosen = next((x for x in near if x.lossless), rec)
+        if best >= exact:
+            status = "in_library_lossless" if chosen.lossless else "in_library_lossy"
+        elif best >= similar:
+            status = "similar"
+        else:
+            return LibraryMatch("new", round(best, 3))
+        return LibraryMatch(status, round(best, 3), chosen.title, chosen.dir, chosen.lossless)
+```
+
+- [ ] **Step 4: Run tests, expect PASS; commit**
+```bash
+.venv/Scripts/python -m pytest tests/test_library.py -v
+git add -A && git commit -m "feat: fuzzy library match over metadata.csv with confidence"
+```
+
+---
+
 ### Task 8: Post-download checker
 
 **Files:**
@@ -1708,6 +2092,147 @@ def check_album(album: Path, expected_tracks, rules: dict | None = None) -> list
 ```bash
 .venv/Scripts/python -m pytest tests/test_checker.py -v
 git add -A && git commit -m "feat: post-download folder checker"
+```
+
+---
+
+### Task 8b: Codec detection with ffprobe
+
+**Files:**
+- Modify: `app/checker.py`
+- Create: `tests/test_codec.py`
+
+**Interfaces:**
+- Produces (added to `app.checker`):
+  - `detect_codec(path, run=subprocess.run) -> dict|None` returning `{"codec": str, "kbps": int|None}`; `None` when ffprobe is missing, exits non-zero, times out (30 s) or returns nothing.
+  - `classify_album(results:list) -> tuple[str, str, list]` = `(codec_label, classification, findings)`. Labels: `"aac 256k"`, `"alac"`, `"unknown"`. Classification: `"Lossy/ [AAC 256k]"` (bitrate = median rounded to the nearest 32 kbps, or `"Lossy/ [AAC]"` if unknown), `"valid for Lossless/"` for alac/flac, else an explanatory string.
+  - `probe_album(album:Path, rules:dict|None=None, run=subprocess.run) -> tuple[str, str, list]`.
+- The codec is read from ffprobe, never from the file extension.
+
+- [ ] **Step 1: Write the failing tests** `tests/test_codec.py`
+```python
+import json
+import subprocess
+from types import SimpleNamespace
+
+from app.checker import classify_album, detect_codec, probe_album
+
+
+def fake_run(payload, code=0):
+    def run(cmd, **kw):
+        assert cmd[0] == "ffprobe" and "-select_streams" in cmd
+        return SimpleNamespace(returncode=code, stdout=json.dumps(payload))
+    return run
+
+
+def test_detect_aac_with_bitrate():
+    r = detect_codec("x.m4a", fake_run({"streams": [{"codec_name": "aac", "bit_rate": "256000"}]}))
+    assert r == {"codec": "aac", "kbps": 256}
+
+
+def test_detect_alac_without_bitrate():
+    r = detect_codec("x.m4a", fake_run({"streams": [{"codec_name": "alac"}]}))
+    assert r == {"codec": "alac", "kbps": None}
+
+
+def test_detect_failures_return_none():
+    assert detect_codec("x", fake_run({"streams": []})) is None
+    assert detect_codec("x", fake_run({}, code=1)) is None
+
+    def missing(cmd, **kw):
+        raise FileNotFoundError("ffprobe")
+
+    def slow(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, 30)
+
+    assert detect_codec("x", missing) is None
+    assert detect_codec("x", slow) is None
+
+
+def test_classify_aac_rounds_to_32():
+    label, cls, findings = classify_album([{"codec": "aac", "kbps": 255}, {"codec": "aac", "kbps": 258}])
+    assert (label, cls, findings) == ("aac 256k", "Lossy/ [AAC 256k]", [])
+
+
+def test_classify_alac_is_lossless_valid():
+    label, cls, _ = classify_album([{"codec": "alac", "kbps": 900}])
+    assert label == "alac" and cls == "valid for Lossless/"
+
+
+def test_classify_mixed_and_partial_failures():
+    label, cls, findings = classify_album([{"codec": "aac", "kbps": 256}, {"codec": "alac", "kbps": None}, None])
+    assert any("mixed codecs" in f for f in findings)
+    assert any("ffprobe failed on 1 file" in f for f in findings)
+
+
+def test_classify_all_unknown():
+    label, cls, findings = classify_album([None, None])
+    assert label == "unknown" and findings and "ffprobe" in findings[0]
+
+
+def test_extension_is_not_trusted(tmp_path):
+    d = tmp_path / "A" / "B"
+    d.mkdir(parents=True)
+    (d / "01 x.m4a").write_bytes(b"x")
+    label, cls, _ = probe_album(d, run=fake_run({"streams": [{"codec_name": "alac"}]}))
+    assert label == "alac"
+    label, cls, _ = probe_album(d, run=fake_run({"streams": [{"codec_name": "aac", "bit_rate": "128000"}]}))
+    assert cls == "Lossy/ [AAC 128k]"
+```
+
+- [ ] **Step 2: Run, expect FAIL** (`ImportError: cannot import name 'detect_codec'`)
+
+- [ ] **Step 3: Implement** (append to `app/checker.py`; add `import statistics`, `import subprocess` and `from collections import Counter` to its imports)
+```python
+def detect_codec(path, run=subprocess.run):
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+           "stream=codec_name,bit_rate", "-of", "json", str(path)]
+    try:
+        r = run(cmd, capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return None
+        streams = json.loads(r.stdout).get("streams") or []
+        if not streams or not streams[0].get("codec_name"):
+            return None
+        br = str(streams[0].get("bit_rate", ""))
+        return {"codec": streams[0]["codec_name"], "kbps": round(int(br) / 1000) if br.isdigit() else None}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def classify_album(results: list) -> tuple:
+    known = [r for r in results if r]
+    findings = []
+    if not known:
+        return "unknown", "unknown codec (ffprobe unavailable or failed)", ["codec unknown: ffprobe unavailable or failed"]
+    failed = len(results) - len(known)
+    if failed:
+        findings.append(f"ffprobe failed on {failed} file(s)")
+    codecs = Counter(r["codec"] for r in known)
+    if len(codecs) > 1:
+        findings.append("mixed codecs: " + ", ".join(sorted(codecs)))
+    dominant = codecs.most_common(1)[0][0]
+    if dominant == "aac":
+        kbps = [r["kbps"] for r in known if r["codec"] == "aac" and r["kbps"]]
+        if kbps:
+            n = int(round(statistics.median(kbps) / 32) * 32)
+            return f"aac {n}k", f"Lossy/ [AAC {n}k]", findings
+        return "aac", "Lossy/ [AAC]", findings
+    if dominant in ("alac", "flac"):
+        return dominant, "valid for Lossless/", findings
+    return dominant, f"unrecognized codec {dominant}", findings
+
+
+def probe_album(album, rules=None, run=subprocess.run) -> tuple:
+    rules = rules or load_rules()
+    files = sorted(f for f in Path(album).iterdir() if f.is_file() and f.suffix.lower() in rules["audio_ext"])
+    return classify_album([detect_codec(f, run) for f in files])
+```
+
+- [ ] **Step 4: Run tests, expect PASS; commit**
+```bash
+.venv/Scripts/python -m pytest tests/test_codec.py tests/test_checker.py -v
+git add -A && git commit -m "feat: detect codec with ffprobe and classify albums"
 ```
 
 ---
