@@ -175,7 +175,7 @@ def from_env(env: Mapping[str, str] | None = None) -> Config:
 - [ ] **Step 5: Run tests, expect PASS, commit**
 ```bash
 .venv/Scripts/python -m pytest tests/test_config.py -v
-git add -A && git commit -m "feat: project scaffold and env config" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git add -A && git commit -m "feat: project scaffold and env config"
 ```
 
 ---
@@ -348,7 +348,7 @@ def parse_many(text: str, storefront: str | None = "jp") -> list:
 - [ ] **Step 4: Run tests, expect PASS; commit**
 ```bash
 .venv/Scripts/python -m pytest tests/test_urls.py -v
-git add -A && git commit -m "feat: normalize apple music urls to jp storefront" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git add -A && git commit -m "feat: normalize apple music urls to jp storefront"
 ```
 
 ---
@@ -581,7 +581,7 @@ class LineSplitter:
 - [ ] **Step 4: Run tests, expect PASS; commit**
 ```bash
 .venv/Scripts/python -m pytest tests/test_parser.py -v
-git add -A && git commit -m "feat: gamdl log parser with rate-limit classification" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git add -A && git commit -m "feat: gamdl log parser with rate-limit classification"
 ```
 
 ---
@@ -810,7 +810,7 @@ Note: `parse_range` is called with the *stripped* string in `_range` (regex allo
 - [ ] **Step 4: Run tests, expect PASS; commit**
 ```bash
 .venv/Scripts/python -m pytest tests/test_guard.py tests/test_settings.py -v
-git add -A && git commit -m "feat: rate-limit guard and validated settings" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git add -A && git commit -m "feat: rate-limit guard and validated settings"
 ```
 
 ---
@@ -1132,7 +1132,7 @@ class Store:
 - [ ] **Step 4: Run tests, expect PASS; commit**
 ```bash
 .venv/Scripts/python -m pytest -v
-git add -A && git commit -m "feat: sqlite store for queue, tracks, log, settings" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git add -A && git commit -m "feat: sqlite store for queue, tracks, log, settings"
 ```
 
 ---
@@ -1298,7 +1298,7 @@ def queue_bytes(store) -> int:
 - [ ] **Step 4: Run tests, expect PASS; commit**
 ```bash
 .venv/Scripts/python -m pytest tests/test_status_helpers.py -v
-git add -A && git commit -m "feat: cookie expiry, disk and size forecast helpers" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git add -A && git commit -m "feat: cookie expiry, disk and size forecast helpers"
 ```
 
 ---
@@ -1531,7 +1531,7 @@ def staging_match(root: str, artist: str, album: str) -> Match:
 - [ ] **Step 4: Run tests, expect PASS; commit**
 ```bash
 .venv/Scripts/python -m pytest tests/test_catalog.py -v
-git add -A && git commit -m "feat: read-only catalog and staging duplicate match" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git add -A && git commit -m "feat: read-only catalog and staging duplicate match"
 ```
 
 ---
@@ -1707,7 +1707,7 @@ def check_album(album: Path, expected_tracks, rules: dict | None = None) -> list
 - [ ] **Step 4: Run tests, expect PASS; commit**
 ```bash
 .venv/Scripts/python -m pytest tests/test_checker.py -v
-git add -A && git commit -m "feat: post-download folder checker" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git add -A && git commit -m "feat: post-download folder checker"
 ```
 
 ---
@@ -1868,7 +1868,7 @@ class PreviewService:
 - [ ] **Step 4: Run tests, expect PASS; commit**
 ```bash
 .venv/Scripts/python -m pytest tests/test_preview.py -v
-git add -A && git commit -m "feat: preview service from public album pages" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git add -A && git commit -m "feat: preview service from public album pages"
 ```
 
 ---
@@ -2512,7 +2512,7 @@ Expected: all PASS. Known timing risk: `test_rate_limit_auto_pauses_and_requeues
 
 - [ ] **Step 7: Commit**
 ```bash
-git add -A && git commit -m "feat: sequential runner with pause, guard, cap, disk gates and fake gamdl" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git add -A && git commit -m "feat: sequential runner with pause, guard, cap, disk gates and fake gamdl"
 ```
 
 ---
@@ -2909,7 +2909,7 @@ Create a placeholder `static/index.html` containing `<!doctype html><title>gamdl
 - [ ] **Step 4: Run tests, fix until PASS; commit**
 ```bash
 .venv/Scripts/python -m pytest -v
-git add -A && git commit -m "feat: http api, sse events and app entrypoint" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git add -A && git commit -m "feat: http api, sse events and app entrypoint"
 ```
 
 ---
@@ -3243,7 +3243,7 @@ Expected: no console errors (`read_console_messages onlyErrors`). Stop the serve
 
 - [ ] **Step 6: Commit**
 ```bash
-git add -A && git commit -m "feat: monochrome queue dashboard frontend" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git add -A && git commit -m "feat: monochrome queue dashboard frontend"
 ```
 
 ---
@@ -3291,5 +3291,5 @@ Run: `.venv/Scripts/python -m pytest -v` -> all PASS. Then `git status` clean. C
 
 - [ ] **Step 5: Commit**
 ```bash
-git add -A && git commit -m "docs: readme and deploy proposal" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+git add -A && git commit -m "docs: readme and deploy proposal"
 ```

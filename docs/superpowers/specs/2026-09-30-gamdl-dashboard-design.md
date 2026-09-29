@@ -63,7 +63,7 @@ States: `queued, downloading, waiting, done, error, skipped, cancelled`. The que
 `GET|PUT /api/settings`; `GET /api/history`. No endpoint ever returns cookie bytes. Log tail is capped at 2000 lines.
 
 ### Settings
-Track delay range, album delay range, error threshold, low-disk threshold (GB). Validated: min <= max, sane bounds, and delays never below the wrapper defaults' lower bounds (5 s track, 30 s album) so the safety intent holds.
+Track delay range, album delay range, error threshold, low-disk threshold (GB), daily cap, `storefront` (2-letter code, or empty to disable the rewrite exactly like the wrapper's `GAMDL_STOREFRONT=""`), `library_exact` (0.85) and `library_similar` (0.55) thresholds, `track_retries` (2), `retry_backoff` (`120-300` s). Validated: min <= max, sane bounds, delays never below the wrapper defaults' lower bounds (5 s track, 30 s album), retry backoff never below 30 s, and `library_similar` < `library_exact`.
 
 ## 4. Interface
 Single screen, dense, keyboard-friendly.
@@ -75,7 +75,8 @@ gamdl   RUNNING | Pause  Resume        disk 121 GB free   cookies 9 d   errors 0
  1  DOWNLOADING  Whales Fall / Artist      6/17    ██████░░░░░░    62%     1.2 MB/s
  2  QUEUED       ...
 -------------------------------------------------------------------------------
- tabs: Tracks | Completed | Settings        (detail pane for the selected row)
+ [+] row toggle expands an inline track list (albums only, default collapsed; see 8.10)
+ tabs: Completed | Settings
 -------------------------------------------------------------------------------
  log (auto-scroll, filter: all/warn/error, copy)
 ```
@@ -165,13 +166,33 @@ After an item reaches `done`, `checker.py` inspects the output folder (read-only
 ### 8.7 Disk forecast
 Sum the expected size of queued items (preview track count x average bytes per track from completed history, with a fallback default of 9 MB/track for AAC) and compare to free space on `/mnt/hdd-backup`. The status bar shows "queue ~X GB, free Y GB"; a banner appears if the forecast exceeds free space minus the low-disk threshold, and the queue does not start an item that would not fit.
 
+### 8.8 Codec detection and classification
+After an item is `done`, `ffprobe` (run off the event loop) reads the audio stream of each output file: `ffprobe -v error -select_streams a:0 -show_entries stream=codec_name,bit_rate -of json <file>`. The codec comes from ffprobe, never from the extension (`.m4a` can be AAC or ALAC).
+- `aac` -> classification "Lossy/ [AAC {kbps}k]" (bitrate rounded to the nearest 32 kbps); `alac` (and `flac`) -> "valid for Lossless/". Mixed codecs in one album produce a finding.
+- Stored on the item (`codec`, `classification`) and shown per finished album. There is no AAC-to-FLAC conversion.
+- If `ffprobe` is missing or fails on a file, codec is `unknown` and the checker reports it; nothing else breaks.
+- The dashboard only **suggests** the destination folder and tag. A "move to Lossy/" button that writes or moves files is out of scope for v1 (it would be its own feature).
+
+### 8.9 Retry with backoff
+A track can stall (about 2.5 min) and fail once, then succeed on retry. Retrying inside one process would need a change to the wrapper (homelab-ops repo), so the dashboard retries at album level:
+- When a run ends with track errors that are **not** rate-limit or auth (the guard verdict always wins and never retries), and `attempts < track_retries` (setting, default 2), the item goes back to `queued` with `attempts + 1` and `not_before = now + random(retry_backoff)` (setting, default `120-300` s, floor 30 s). The runner starts other due items meanwhile, still strictly one at a time.
+- Because `overwrite=false`, gamdl skips files that already exist, so the re-run downloads only the missing tracks.
+- When retries are exhausted the item becomes `error`. A manual retry resets `attempts` to 0.
+- Retried requests still respect the album delay, the daily cap and the guard. The UI shows "retry 1/2, in 143 s".
+
+### 8.10 Expandable album detail
+Each queue row and each Completed entry for an album (more than one track) has a toggle that expands an inline track list: number, title, status (queued/downloading/done/skipped/error), note (skip reason), and per-track size when known. **Default collapsed.** Single-track downloads (a `song` URL, or an item whose `expected_tracks`/`track_n` is 1) have no toggle and no detail panel. Expanded state is kept in memory for the session (never required for correctness). The toggle is a real `button` with `aria-expanded`/`aria-controls`, operable by keyboard. This replaces the separate "Tracks" tab from section 4.
+
 ## 9. Updated interface additions
 Add box becomes a two-step flow: paste -> preview table (title, artist, tracks, storefront-normalized URL, library match, checkbox) -> "Queue selected". Completed tab gains a per-album checker findings list. Status bar gains cap usage ("38/150 tracks today"), forecast and cookie expiry. New banners: `cap_reached`, `forecast`. All follow the monochrome rules in section 5.
 
 ## 10. Out of scope (v1)
-Auth/login, multi-user, notifications, Docker image, moving or renaming files, editing gamdl `config.ini`, writing to `catalog.sqlite`, parallel downloads (never).
+Auth/login, multi-user, notifications, Docker image, moving or renaming files (including a "move to Lossy/" button), editing gamdl `config.ini`, writing to `catalog.sqlite` or `metadata.csv`, AAC-to-FLAC conversion, in-process per-track retry (needs a wrapper change in homelab-ops), parallel downloads (never).
+
+Git conventions for this repo: commits as Maja, plain messages, no Co-Authored-By trailer and no Claude attribution.
 
 ## 11. Open items
+- The JSON-LD fields on public album pages (`track[].name`, `track[].duration` as ISO-8601) are assumed from schema.org; verified against one real page with user approval before the library score is tuned. Score weights and thresholds are tuned against the real `metadata.csv`.
 - Whether gamdl offers a download-free metadata mode (decides the preview mechanism, section 8.2); checked first in the plan.
 - The real `docs/music-standards.md` is in homelab-ops and was not read; checker rules (8.5) are provisional until aligned to it.
 - Exact wrapper exit codes and the precise 429/403 log wording are unverified. The parser is fixture-driven and will be tuned once a real error log is captured (user supplies one, or it is captured on the first supervised run).
