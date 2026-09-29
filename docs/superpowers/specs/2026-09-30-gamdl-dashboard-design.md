@@ -58,7 +58,7 @@ States: `queued, downloading, waiting, done, error, skipped, cancelled`. The que
 - If the flock is held by another process, report `busy` and do not spawn.
 
 ### API
-`GET /api/state` snapshot; `GET /api/events` SSE; `POST /api/queue` (multi-line urls, validated to `music.apple.com`, deduped);
+`GET /api/state` snapshot; `GET /api/events` SSE; `POST /api/preview` and `POST /api/queue` (multiple urls, normalized to `/jp/` per 8.1, validated to `music.apple.com`, deduped, per-line results);
 `POST /api/queue/{id}/{cancel|retry|remove}`; `POST /api/queue/reorder`; `POST /api/pause`, `/api/resume`;
 `GET|PUT /api/settings`; `GET /api/history`. No endpoint ever returns cookie bytes. Log tail is capped at 2000 lines.
 
@@ -109,8 +109,49 @@ Principle: the interface is a tool, not a brand. Every pixel carries information
 - API tests via FastAPI `TestClient`, including "cookie content never appears in any response or log" using a canary cookie file.
 - Manual browser pass for the UI. No real Apple or network calls in tests.
 
-## 8. Out of scope (v1)
-Auth/login, multi-user, notifications, Docker image, moving files into `Lossless/`/`Lossy/`, editing gamdl `config.ini`, parallel downloads (never).
+## 8. Added features (2026-09-30 review)
 
-## 9. Open items
+### 8.1 Multi-URL input and the /jp/ storefront
+The add box accepts any number of URLs (newline, space or comma separated). Example input:
+```
+https://music.apple.com/jp/album/%E6%BA%9C%E6%81%AF/1791035368
+https://music.apple.com/id/album/frozen-flower/1851922484
+```
+- **Normalization (`urls.py`, pure):** every URL is parsed and rewritten to the `jp` storefront: `https://music.apple.com/jp/<type>/<id>`. The slug is dropped because the numeric ID is what identifies the item; percent-encoding is decoded for display only. So the second example above is queued as `https://music.apple.com/jp/album/1851922484`. The original URL is kept on the item for display and debugging.
+- Accepted types: `album`, `playlist`, `song`, `artist`, and `?i=<trackid>` song-in-album links. Anything not on `music.apple.com` is rejected per line with a reason; valid lines are still queued (partial success, with a per-line result list).
+- Deduplicated by (type, id) against the queue and history.
+- **Caveat:** an ID that exists in `id` may not exist in the `jp` storefront. If gamdl reports not-found/unavailable for a `/jp/` URL, the item becomes `error` with the reason "not available in jp storefront". It is never silently retried on another storefront, because the user asked for jp; the item offers a manual "retry as original storefront" action.
+- The `/jp/` rule is a setting (`storefront`, default `jp`) so it lives in one place.
+
+### 8.2 Preview before queueing
+Pasted URLs are first resolved to a preview: title, artist, track count, release year. Nothing is queued until the user confirms the preview, and each row can be unchecked. Artist and playlist URLs show their expanded size, with a warning above a configurable track count (default 100). The metadata lookup goes through the same sequential runner lock and the same delay rules as downloads, so previewing counts against the request budget. If gamdl has no download-free metadata mode, the fallback is a direct Apple Music web page fetch of the public page title only, with no cookies, at most one request per URL with a random delay; if neither works, preview shows the normalized URL only and says so. This is verified in the first plan task, before anything depends on it.
+
+### 8.3 Download cap
+Setting `max_tracks_per_24h` (default 150, 0 = off). The store keeps a timestamped log of finished tracks; when the rolling 24 h count reaches the cap, the queue pauses with banner `cap_reached` and shows the time when the oldest counted track ages out. It resumes automatically only when the user has enabled `auto_resume_after_cap`; default is manual.
+
+### 8.4 Library duplicate check (catalog.sqlite)
+Source: `music/catalog.sqlite` (server path `/mnt/hdd-backup/music/catalog.sqlite`, SMB `\\192.168.18.225\homelab\hdd-backup\music\catalog.sqlite`). It is opened **read-only** (`mode=ro`, never written) and only when needed; the path is a setting. Observed schema: one table `tracks(id, relative_path UNIQUE, filename, category, format, size_bytes, is_lossless)`, ~25k rows, `relative_path` shaped `Lossless|Lossy/<Category>/<Artist ~>/<Album>/NN. Title.<ext>`. It holds no Apple IDs.
+- Matching is therefore by names: normalize (NFKC, casefold, strip punctuation and the `~` suffix, keep both romaji and kanji parts) the preview's artist + album, then compare against the artist and album path segments; report `exact`, `likely` (fuzzy, with the matched path) or `none`. Also compare track count and whether the existing files are lossless.
+- Shown in the preview as "already in library: Lossless/J-Pop/... (12 tracks, FLAC)". Warning only: the user decides. Because the dashboard downloads AAC, an existing lossless match is highlighted as "you already have a better copy".
+- If the catalog is missing, stale or unreadable, the check shows "catalog unavailable" and never blocks queueing. The catalog is a file on a NAS that is rebuilt elsewhere, so it is treated as possibly out of date, and its mtime is shown.
+- Staging folders (`_gamdl-incoming`) are also checked directly on disk by directory name, since they are not in the catalog.
+
+### 8.5 Post-download checker
+After an item reaches `done`, `checker.py` inspects the output folder (read-only) and lists problems against `docs/music-standards.md` conventions visible in the catalog: artist folder should follow `Romaji (Kanji) ~`, missing `Cover.jpg`, missing `.lrc` when lyrics are on, track file count differing from `Track n/N`, zero-byte files, disallowed characters. Findings appear in the Completed tab as a plain list per album. It never renames or moves anything. The rule set is a small data file in the repo so it can be changed without touching code; rules are limited to what the catalog and the brief demonstrate. If the real `music-standards.md` is provided, the rules are aligned to it in the plan.
+
+### 8.6 Cookie expiry warning
+`cookies.py` parses `cookies.txt` line by line and keeps only the **expiry timestamp** of each apple.com cookie: name and value are discarded immediately, never stored, logged or returned. The UI shows "earliest expiry in N days" and warns at 7 days or when expired. The parse is in memory and returns a single integer.
+
+### 8.7 Disk forecast
+Sum the expected size of queued items (preview track count x average bytes per track from completed history, with a fallback default of 9 MB/track for AAC) and compare to free space on `/mnt/hdd-backup`. The status bar shows "queue ~X GB, free Y GB"; a banner appears if the forecast exceeds free space minus the low-disk threshold, and the queue does not start an item that would not fit.
+
+## 9. Updated interface additions
+Add box becomes a two-step flow: paste -> preview table (title, artist, tracks, storefront-normalized URL, library match, checkbox) -> "Queue selected". Completed tab gains a per-album checker findings list. Status bar gains cap usage ("38/150 tracks today"), forecast and cookie expiry. New banners: `cap_reached`, `forecast`. All follow the monochrome rules in section 5.
+
+## 10. Out of scope (v1)
+Auth/login, multi-user, notifications, Docker image, moving or renaming files, editing gamdl `config.ini`, writing to `catalog.sqlite`, parallel downloads (never).
+
+## 11. Open items
+- Whether gamdl offers a download-free metadata mode (decides the preview mechanism, section 8.2); checked first in the plan.
+- The real `docs/music-standards.md` is in homelab-ops and was not read; checker rules (8.5) are provisional until aligned to it.
 - Exact wrapper exit codes and the precise 429/403 log wording are unverified. The parser is fixture-driven and will be tuned once a real error log is captured (user supplies one, or it is captured on the first supervised run).
