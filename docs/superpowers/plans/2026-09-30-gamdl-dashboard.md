@@ -610,7 +610,7 @@ git add -A && git commit -m "feat: gamdl log parser with rate-limit classificati
 - Consumes: event classes from `app.parser`.
 - Produces:
   - `Verdict(kind:str, reason:str)` with `kind in {"rate_limited","cookies"}`; `Guard(threshold:int)` with attribute `consecutive:int` and `on_event(ev) -> Verdict|None`, `reset()`.
-  - `settings.DEFAULTS: dict`, `settings.parse_range(s:str) -> tuple[float,float]`, `settings.validate(patch:dict) -> dict` (returns cleaned patch, raises `ValueError` with a readable message).
+  - `settings.DEFAULTS: dict`, `settings.parse_range(s:str) -> tuple[float,float]`, `settings.validate(patch:dict) -> dict` (returns cleaned patch, raises `ValueError` with a readable message), `settings.check_merged(settings:dict) -> None` (cross-field rule: `library_similar` < `library_exact`; called by `Store.put_settings` after merging).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4089,7 +4089,7 @@ TimeoutStopSec=15
 WantedBy=multi-user.target
 ```
 
-- [ ] **Step 2: Write** `README.md` (short) covering: what it is, `pip install -e ".[dev]"`, running tests, dev run with the fake wrapper (the command from Task 12), env vars table (from `app/config.py`), the safety rules (sequential, album delay owned by the dashboard, auto-pause, cookies never read), and a warning "bind is 0.0.0.0 by default; firewall so only LAN/Tailscale can reach 8110".
+- [ ] **Step 2: Write** `README.md` (short) covering: what it is, `pip install -e ".[dev]"`, running tests, dev run with the fake wrapper (the command from Task 12), env vars table (from `app/config.py`, including `GAMDL_DASH_LIBRARY_CSV`), the safety rules (sequential, album delay owned by the dashboard, auto-pause, cookies never read), and a warning "bind is 0.0.0.0 by default; firewall so only LAN/Tailscale can reach 8110".
 
 `deploy/README.md`: "PROPOSAL, not deployed. Deploy from the homelab-ops repo: git pull, lock in CURRENT_OPS.md, get user confirmation first." Steps to list (for the user, not executed): copy repo to `/opt/gamdl-dashboard`, create venv, install, install the unit, `systemctl enable --now`, then update `docs/services.md` and add the compose/systemd note in homelab-ops.
 
@@ -4102,6 +4102,8 @@ Run: `.venv/Scripts/python -m pytest -v` -> all PASS. Then `git status` clean. C
   2. Preview parsing assumes schema.org JSON-LD on public album pages. With user approval, fetch one public page (`https://music.apple.com/jp/album/1791035368`) from this machine and compare against `parse_page`; adjust and add a fixture if it differs.
   3. Real 429/403 wording and exit codes: capture from the first supervised run and add a fixture to `tests/test_parser.py`.
   4. Align `app/checker_rules.json` with `docs/music-standards.md` (read-only from homelab-ops) once the user allows.
+  5. Tune the library score against the real `metadata.csv` (read-only): pick 10 albums known to be in the library and 10 known to be new, run `Library.match` on hand-built `RemoteAlbum`s, and adjust `library_exact`/`library_similar` if needed. Confirm the Apple page really exposes `track[].duration`; if not, the score is capped at 0.80 (title, count and overlap only) and lossless hits will show as `similar`, which is safe but noisier.
+  6. Confirm `ffprobe` is on the server PATH (it ships with the apt `ffmpeg` package) before relying on codec detection; ask before running anything on the server.
 
 - [ ] **Step 5: Commit**
 ```bash
