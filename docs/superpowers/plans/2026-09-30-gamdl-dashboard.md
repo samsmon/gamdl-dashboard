@@ -3180,8 +3180,8 @@ git add -A && git commit -m "feat: sequential runner with pause, guard, cap, dis
 - Produces `create_app(cfg: Config | None = None) -> FastAPI` and these routes (JSON):
   - `GET /api/state` -> `{now, items[], paused, banner, settings, disk:{free_bytes}, cookies, cap:{used,limit}, forecast_bytes, errors}`. Each item has `findings` decoded to a list and `live` for the running one.
   - `POST /api/parse` `{text}` -> `{results:[{raw, error, url, kind, id, storefront, duplicate}]}` (instant, no network).
-  - `POST /api/preview` `{url}` -> `{preview, library, staging, duplicate, large}`.
-  - `POST /api/queue` `{items:[{url, title?, artist?, tracks?}]}` -> `{results:[{url, id, error}]}`.
+  - `POST /api/preview` `{url}` -> `{preview, library, staging, duplicate, large}` where `library = {status, confidence, album, path, lossless, reasons, source ("metadata"|"catalog"), metadata_mtime, default_checked, needs_force}` and `status` is one of `in_library_lossless, in_library_lossy, similar, new, in_staging, unknown, unavailable`. `needs_force` is true for `in_library_lossless`, `similar`, `in_staging`; `default_checked` is its negation. If `metadata.csv` is unavailable the catalog name match is used and can only yield `similar` or `new`. The final status is remembered per normalized URL (`app.state.pcache`).
+  - `POST /api/queue` `{items:[{url, title?, artist?, tracks?, force?:bool}]}` -> `{results:[{url, id, error}]}`. An item whose remembered preview status needs force is refused with a "use download anyway" error unless `force` is true; the accepted item stores `library_status`.
   - `POST /api/queue/{id}/{cancel|retry|retry_original|remove}` -> `{ok:true}`; `POST /api/queue/reorder` `{ids}`.
   - `POST /api/pause`, `POST /api/resume`, `GET|PUT /api/settings` (PUT returns 422 with `detail` on invalid values).
   - `GET /api/queue/{id}` -> item + `tracks`; `GET /api/history`; `GET /api/log?limit=`.
@@ -3191,6 +3191,7 @@ git add -A && git commit -m "feat: sequential runner with pause, guard, cap, dis
 
 - [ ] **Step 1: Write the failing tests** `tests/test_api.py`
 ```python
+import csv
 import json
 import sys
 from pathlib import Path
@@ -3209,9 +3210,16 @@ CANARY = "CANARY-SECRET-COOKIE-VALUE"
 def client(tmp_path):
     cookies = tmp_path / "cookies.txt"
     cookies.write_text(f".apple.com\tTRUE\t/\tTRUE\t4102444800\tsession\t{CANARY}\n")
+    meta = tmp_path / "metadata.csv"  # a one-album library: 溜息 by ロクデナシ, lossless
+    with open(meta, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["Title", "Artist", "Album", "Album Artist", "Codec", "Duration", "Path"])
+        for t, d in (("心の奥", 200.0), ("溜息", 240.0)):
+            w.writerow([t, "ロクデナシ", "溜息", "ロクデナシ", "audio/flac", d, f"E:/Music\\L\\溜息\\{t}.flac"])
     cfg = Config(db_path=str(tmp_path / "d.sqlite"), gamdl_cmd=[sys.executable, FAKE], extra_args=[],
                  staging_dir=str(tmp_path / "st"), disk_path=str(tmp_path), cookies_path=str(cookies),
-                 catalog_path=str(tmp_path / "none.sqlite"), host="127.0.0.1", port=0, autostart=False)
+                 catalog_path=str(tmp_path / "none.sqlite"), host="127.0.0.1", port=0, autostart=False,
+                 library_csv=str(meta))
     app = create_app(cfg)
     with TestClient(app) as c:
         c.cfg = cfg
@@ -3280,7 +3288,48 @@ def test_preview_survives_missing_catalog_and_network(client, monkeypatch):
     monkeypatch.setattr(api_mod, "PREVIEW_GETTER", boom, raising=False)
     r = client.post("/api/preview", json={"url": "https://music.apple.com/jp/album/1"}).json()
     assert r["preview"]["source"] == "none"
-    assert r["library"]["level"] in ("none", "unavailable")
+    assert r["library"]["status"] in ("unknown", "unavailable", "new")
+    assert r["library"]["needs_force"] is False and r["library"]["default_checked"] is True
+
+
+def album_page():
+    ld = {"@type": "MusicAlbum", "name": "溜息", "byArtist": {"name": "ロクデナシ"}, "numTracks": 2,
+          "track": [{"name": "心の奥", "duration": "PT3M20S"}, {"name": "溜息", "duration": "PT4M0S"}]}
+    return f'<script type="application/ld+json">{json.dumps(ld, ensure_ascii=False)}</script>'
+
+
+def test_preview_flags_lossless_library_hit_and_queue_needs_force(client, monkeypatch):
+    import app.api as api_mod
+
+    async def getter(url):
+        return album_page()
+
+    monkeypatch.setattr(api_mod, "PREVIEW_GETTER", getter, raising=False)
+    url = "https://music.apple.com/jp/album/42"
+    r = client.post("/api/preview", json={"url": url}).json()
+    assert r["library"]["status"] == "in_library_lossless" and r["library"]["confidence"] >= 0.85
+    assert r["library"]["needs_force"] is True and r["library"]["default_checked"] is False
+    assert r["library"]["source"] == "metadata"
+    refused = client.post("/api/queue", json={"items": [{"url": url}]}).json()["results"][0]
+    assert refused["id"] is None and "download anyway" in refused["error"]
+    ok = client.post("/api/queue", json={"items": [{"url": url, "force": True}]}).json()["results"][0]
+    assert ok["id"] and client.get(f"/api/queue/{ok['id']}").json()["library_status"] == "in_library_lossless"
+
+
+def test_unpreviewed_url_can_be_queued_without_force(client):
+    r = client.post("/api/queue", json={"items": [{"url": "https://music.apple.com/jp/album/43"}]}).json()
+    assert r["results"][0]["id"]
+
+
+def test_new_album_is_default_checked(client, monkeypatch):
+    import app.api as api_mod
+
+    async def getter(url):
+        return album_page().replace("溜息", "Different Album").replace("心の奥", "Other Song")
+
+    monkeypatch.setattr(api_mod, "PREVIEW_GETTER", getter, raising=False)
+    r = client.post("/api/preview", json={"url": "https://music.apple.com/jp/album/44"}).json()
+    assert r["library"]["status"] == "new" and r["library"]["default_checked"] is True
 
 
 def test_cookie_values_never_leak(client, tmp_path):
@@ -3317,6 +3366,7 @@ from app.bus import EventBus
 from app.catalog import Catalog, staging_match
 from app.config import Config, from_env
 from app.cookies import cookie_status
+from app.library import Library, LibraryMatch
 from app.preview import PreviewService
 from app.runner import Runner
 from app.store import Store
@@ -3324,6 +3374,7 @@ from app.urls import UrlError, normalize, parse_many
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
 PREVIEW_GETTER = None  # tests may replace this; None = real httpx getter
+NEEDS_FORCE = {"in_library_lossless", "similar", "in_staging"}
 
 
 class ParseIn(BaseModel):
@@ -3339,6 +3390,7 @@ class QueueItemIn(BaseModel):
     title: str | None = None
     artist: str | None = None
     tracks: int | None = None
+    force: bool = False
 
 
 class QueueIn(BaseModel):
@@ -3362,6 +3414,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     store, bus = Store(cfg.db_path), EventBus()
     runner = Runner(store, bus, cfg)
     catalog = Catalog(cfg.catalog_path)
+    library = Library(cfg.library_csv)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -3419,17 +3472,32 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             raise HTTPException(422, str(e))
         svc = app.state.previews
         pv = await svc.fetch(p)
-        lib = catalog.match(pv.artist, pv.title) if pv.title else catalog.match("", "")
+        s = store.get_settings()
+        lib = library.match(pv.remote(), s["library_exact"], s["library_similar"])
+        source = "metadata"
+        if lib.status == "unavailable" and pv.title:
+            # metadata.csv unreadable: fall back to names from catalog.sqlite, which can never say "in library"
+            cm = catalog.match(pv.artist, pv.title)
+            source = "catalog"
+            hit = cm.level in ("exact", "likely")
+            lib = LibraryMatch("similar" if hit else "new", 0.0, "", cm.paths[0] if hit else "",
+                               cm.lossless if hit else None, ["metadata.csv unavailable: catalog names only"])
         stg = staging_match(cfg.staging_dir, pv.artist, pv.title) if pv.title else None
-        limit = store.get_settings()["preview_max_tracks"]
+        status = lib.status
+        if status in ("new", "unknown", "unavailable") and stg and stg.level != "none":
+            status = "in_staging"
+        app.state.pcache[p.normalized] = status
         return {
-            "preview": asdict(pv), "library": {**asdict(lib), "catalog_mtime": catalog.mtime()},
+            "preview": asdict(pv),
+            "library": {**asdict(lib), "status": status, "source": source, "metadata_mtime": library.mtime(),
+                        "default_checked": status not in NEEDS_FORCE, "needs_force": status in NEEDS_FORCE},
             "staging": asdict(stg) if stg else None,
             "duplicate": bool(store.find_by_key(p.kind, p.id, p.track_id)),
-            "large": bool(pv.tracks and pv.tracks > limit),
+            "large": bool(pv.tracks and pv.tracks > s["preview_max_tracks"]),
         }
 
     app.state.previews = PreviewService(getter=None)
+    app.state.pcache = {}
 
     @app.middleware("http")
     async def _late_getter(request: Request, call_next):
@@ -3451,7 +3519,14 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             if store.find_by_key(p.kind, p.id, p.track_id):
                 results.append({"url": p.normalized, "id": None, "error": "already in queue or history"})
                 continue
+            status = app.state.pcache.get(p.normalized)
+            if status in NEEDS_FORCE and not it.force:
+                results.append({"url": p.normalized, "id": None,
+                                "error": f"{status.replace('_', ' ')}: use download anyway to queue it"})
+                continue
             new_id = store.add_item(p.normalized, p.original, p.kind, p.id, p.track_id, it.title, it.artist, it.tracks)
+            if status:
+                store.update_item(new_id, library_status=status)
             results.append({"url": p.normalized, "id": new_id, "error": None})
         runner.wake()
         bus.publish({"type": "state"})
@@ -3478,7 +3553,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         elif action in ("retry", "retry_original"):
             if running:
                 raise HTTPException(409, "item is running")
-            fields = {"status": "queued", "error_msg": None, "errors": 0}
+            fields = {"status": "queued", "error_msg": None, "errors": 0, "attempts": 0, "not_before": None}
             if action == "retry_original":
                 fields["url"] = normalize(item["original_url"], None).normalized
             store.update_item(item_id, **fields)
