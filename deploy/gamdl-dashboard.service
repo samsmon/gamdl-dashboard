@@ -1,0 +1,16 @@
+[Unit]
+Description=gamdl dashboard
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/gamdl-dashboard
+Environment=GAMDL_DASH_DB=/opt/gamdl-dashboard/data/dashboard.sqlite
+Environment=GAMDL_DASH_PORT=8110
+ExecStart=/opt/gamdl-dashboard/.venv/bin/python -m app
+Restart=on-failure
+KillMode=control-group
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
