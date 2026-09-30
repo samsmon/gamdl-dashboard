@@ -32,6 +32,17 @@ def test_earliest_expiry_only_apple_and_no_secrets(tmp_path):
     assert "SECRET" not in repr(s)
 
 
+def test_token_must_be_media_user_token_on_music_domain(tmp_path):
+    good = write_cookies(tmp_path, extra=f".music.apple.com\tTRUE\t/\tTRUE\t{int(NOW)+86400}\tmedia-user-token\tTOK")
+    s = cookie_status(good, NOW)
+    assert s["has_token"] and s["problem"] is None and "TOK" not in repr(s)
+    wrong_domain = write_cookies(tmp_path, extra=f".apple.com\tTRUE\t/\tTRUE\t{int(NOW)+86400}\tmedia-user-token\tTOK")
+    s = cookie_status(wrong_domain, NOW)
+    assert not s["has_token"] and "media-user-token" in s["problem"]
+    other = write_cookies(tmp_path, int(NOW) + 86400)  # e.g. a Navidrome/browser cookie export, no Apple token
+    assert not cookie_status(other, NOW)["has_token"]
+
+
 def test_httponly(tmp_path):
     p = write_cookies(tmp_path, extra=f"#HttpOnly_.apple.com\tTRUE\t/\tTRUE\t{int(NOW)+86400*30}\tx\ty")
     s = cookie_status(p, NOW)

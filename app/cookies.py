@@ -10,6 +10,7 @@ def cookie_status(path: str, now: float | None = None) -> dict:
     except OSError:
         return {"exists": False, "age_days": None, "expiry_days": None, "expired": False}
     earliest = None
+    has_token = False
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
@@ -21,6 +22,8 @@ def cookie_status(path: str, now: float | None = None) -> dict:
                 fields = line.split("\t")
                 if len(fields) < 7:
                     continue
+                if fields[0] == ".music.apple.com" and fields[5] == "media-user-token" and fields[6].strip():
+                    has_token = True  # gamdl requires exactly this domain + name
                 d = fields[0].lstrip(".")
                 if d != "apple.com" and not d.endswith(".apple.com"):
                     continue
@@ -38,4 +41,6 @@ def cookie_status(path: str, now: float | None = None) -> dict:
         "age_days": max(0.0, (now - mtime) / 86400),
         "expiry_days": expiry_days,
         "expired": earliest is not None and earliest <= now,
+        "has_token": has_token,
+        "problem": None if has_token else "no media-user-token cookie on .music.apple.com (export cookies.txt while on music.apple.com, logged in)",
     }

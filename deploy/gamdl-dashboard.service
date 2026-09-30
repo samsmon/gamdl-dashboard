@@ -4,13 +4,14 @@ After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/gamdl-dashboard
-Environment=GAMDL_DASH_DB=/opt/gamdl-dashboard/data/dashboard.sqlite
-Environment=GAMDL_DASH_PORT=8110
-ExecStart=/opt/gamdl-dashboard/.venv/bin/python -m app
-Restart=on-failure
+# @REPO@ and @USER_LINE@ are filled in by deploy/install.sh
+WorkingDirectory=@REPO@
+EnvironmentFile=/etc/gamdl-dashboard.env
+ExecStart=@REPO@/.venv/bin/python -m app
+@USER_LINE@Restart=on-failure
 KillMode=control-group
 TimeoutStopSec=15
+# No PrivateTmp: the gamdl-safe lock lives in the shared tmp dir, so a manual run must see it.
 
 [Install]
 WantedBy=multi-user.target

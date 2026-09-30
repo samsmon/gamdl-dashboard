@@ -124,7 +124,8 @@ function renderBar() {
 function renderBanner() {
   const b = $("#banner"), msgs = [];
   if (S.banner) msgs.push(`${S.banner.kind}: ${S.banner.reason}. Fix the cause, then press resume.`);
-  if (S.cookies.expired) msgs.push("cookies expired: re-export cookies.txt.");
+  if (S.cookies.exists && S.cookies.problem) msgs.push(`cookies unusable: ${S.cookies.problem}.`);
+  else if (S.cookies.expired) msgs.push("cookies expired: re-export cookies.txt.");
   else if (S.cookies.exists && S.cookies.expiry_days != null && S.cookies.expiry_days <= 7) msgs.push(`cookies expire in ${S.cookies.expiry_days} d: re-export soon.`);
   b.hidden = msgs.length === 0; b.textContent = msgs.join(" ");
 }

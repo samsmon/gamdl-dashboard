@@ -73,13 +73,14 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if store.recover_after_crash():
             store.set_flag("paused", "1")
             store.set_banner("recovered", "restarted while a download was running; resume to continue")
-        task = asyncio.create_task(runner.run_forever()) if cfg.autostart else None
+        if not cfg.autostart:
+            store.set_flag("paused", "1")  # the runner loop always runs; autostart=0 only starts it paused
+        task = asyncio.create_task(runner.run_forever())
         yield
         runner.stop()
-        if task:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     app = FastAPI(lifespan=lifespan)
 

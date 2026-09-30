@@ -37,6 +37,21 @@ def q(client, *urls):
     return client.post("/api/queue", json={"items": [{"url": u} for u in urls]}).json()
 
 
+def test_autostart_false_starts_paused_but_runner_processes_after_resume(client):
+    import time
+    assert client.get("/api/state").json()["paused"] is True
+    r = q(client, "https://music.apple.com/jp/album/1851922484")
+    item_id = r["results"][0]["id"]
+    time.sleep(0.5)
+    assert client.get(f"/api/queue/{item_id}").json()["status"] == "queued"  # paused: nothing runs
+    client.post("/api/resume")
+    for _ in range(40):
+        if client.get(f"/api/queue/{item_id}").json()["status"] != "queued":
+            break
+        time.sleep(0.25)
+    assert client.get(f"/api/queue/{item_id}").json()["status"] != "queued"  # the runner loop exists and picked it up
+
+
 def test_parse_reports_jp_normalization_and_errors(client):
     r = client.post("/api/parse", json={"text": "https://music.apple.com/id/album/frozen-flower/1851922484 nonsense"}).json()
     assert r["results"][0]["url"] == "https://music.apple.com/jp/album/1851922484"

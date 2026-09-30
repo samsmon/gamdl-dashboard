@@ -1,11 +1,13 @@
+import sys
+
 from app.config import from_env
 
 
 def test_defaults():
     c = from_env({})
     assert c.port == 8110
-    assert c.host == "0.0.0.0"
-    assert c.gamdl_cmd == ["/usr/local/bin/gamdl-safe"]
+    assert c.host == "127.0.0.1"
+    assert c.gamdl_cmd == [sys.executable, "-m", "app.gamdl_safe"]
     assert c.extra_args == ["--no-exceptions"]
     assert c.staging_dir == "/mnt/hdd-backup/music/_gamdl-incoming"
     assert c.library_csv == "/mnt/hdd-backup/music/metadata.csv"
