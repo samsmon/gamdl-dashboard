@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from app import checker, disk, forecast
 from app.guard import Guard
 from app.library import Library, library_note, remote_from_dir
+from app.releases import Itunes, display_title
 from app.parser import (AlbumDelay, Finished, Line, LineSplitter, Progress, TrackDelay, TrackError,
                         TrackSkip, TrackStart, UrlStart, parse_line)
 from app.settings import parse_range
@@ -37,6 +38,7 @@ class Runner:
     def __init__(self, store, bus, cfg, sleep=asyncio.sleep, clock=time.time, rand=random.uniform):
         self.store, self.bus, self.cfg = store, bus, cfg
         self.library = Library(cfg.library_csv)
+        self.itunes = Itunes()
         self._sleep, self._clock, self._rand = sleep, clock, rand
         self.proc = None
         self.current_id = None
@@ -229,6 +231,7 @@ class Runner:
         self.store.update_item(iid, status="downloading", started_at=self._clock(), finished_at=None,
                                error_msg=None, errors=0, track_i=None, track_n=None, findings=None)
         self._state()
+        await self._prefetch(item)
         argv = [*self.cfg.gamdl_cmd, *self.cfg.extra_args, item["url"]]
         try:
             self.proc = await asyncio.create_subprocess_exec(
@@ -389,6 +392,26 @@ class Runner:
         self._cancel = self._pause_after_track = False
         self._last_finish = now
         self._state()
+
+    async def _prefetch(self, item):
+        """When an album starts: name, kind, artist and the whole track list from Apple's public lookup (one request per
+        album, never at add time), so the UI shows every track as queued straight away. Skipped quietly on any failure."""
+        if not self.cfg.prefetch or item["kind"] != "album" or item["track_id"] or not str(item["ext_id"]).isdigit():
+            return
+        try:
+            meta = await asyncio.wait_for(self.itunes.album(str(item["ext_id"]), self.store.get_settings()["storefront"] or "jp"), 8)
+            if not meta or not meta["tracks"]:
+                return
+            iid, n = item["id"], len(meta["tracks"])
+            info = {k: meta[k] for k in ("kind", "release_date", "genre", "copyright", "explicit", "artwork", "url", "total_ms")}
+            self.store.update_item(iid, title=display_title(meta["name"], meta["kind"]), artist=meta["artist"] or item["artist"],
+                                   expected_tracks=n, track_n=n, meta=json.dumps(info))
+            for t in meta["tracks"]:
+                self.store.upsert_track(iid, t["n"], t["title"], "queued", None, t["ms"], t["artist"] or None)
+            self.bus.publish({"type": "tracks", "item_id": iid})
+            self._state()
+        except Exception:  # Apple unreachable, timeout, odd data: the download itself must not care
+            pass
 
     def _fill_names(self, iid):
         """Items are queued without a title (nothing is looked up when adding), so take album and artist from the

@@ -19,6 +19,7 @@ class Config:
     autostart: bool
     library_csv: str = ""
     watch: bool = True
+    prefetch: bool = False
 
 
 def _split(value: str) -> list:
@@ -40,4 +41,5 @@ def from_env(env: Mapping[str, str] | None = None) -> Config:
         autostart=e.get("GAMDL_DASH_AUTOSTART", "1") not in ("0", "false", "no"),
         library_csv=e.get("GAMDL_DASH_LIBRARY_CSV", "/mnt/hdd-backup/music/metadata.csv"),
         watch=e.get("GAMDL_DASH_WATCH", "1") not in ("0", "false", "no"),
+        prefetch=e.get("GAMDL_DASH_PREFETCH", "1") not in ("0", "false", "no"),
     )

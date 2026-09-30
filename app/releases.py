@@ -29,6 +29,12 @@ def kind_of(name: str) -> str:
     return "album"
 
 
+def display_title(name: str, kind: str) -> str:
+    """"Living - Single" / "日陰 - EP" / "Frozen Flower - Album": always name plus its kind."""
+    base = re.sub(r"\s*-\s*(single|ep)\s*$", "", name or "", flags=re.I).strip()
+    return f"{base} - {'EP' if kind == 'ep' else kind.capitalize()}"
+
+
 def _date(s) -> str:
     return (s or "")[:10]
 
@@ -60,6 +66,26 @@ class Itunes:
         if not artist_id or not name:
             raise ReleaseError("could not work out the artist for that id")
         return str(artist_id), name
+
+    async def album(self, collection_id: str, storefront: str):
+        """Name, kind, artist and the full track list of one album, or None when Apple does not know it."""
+        data = await self._getter({"id": collection_id, "entity": "song", "country": storefront, "limit": 200})
+        rows = data.get("results") or []
+        coll = next((r for r in rows if r.get("wrapperType") == "collection"), None)
+        if not coll:
+            return None
+        songs = sorted((r for r in rows if r.get("wrapperType") == "track" and r.get("kind") == "song"),
+                       key=lambda r: (r.get("discNumber") or 1, r.get("trackNumber") or 0))
+        name = coll.get("collectionName") or ""
+        art = (coll.get("artworkUrl100") or "").replace("100x100bb", "300x300bb")
+        tracks = [{"n": i, "title": s.get("trackName") or "", "ms": s.get("trackTimeMillis"), "artist": s.get("artistName") or "",
+                   "explicit": s.get("trackExplicitness") == "explicit"} for i, s in enumerate(songs, 1)]
+        return {"name": name, "kind": kind_of(name), "artist": coll.get("artistName") or "",
+                "track_count": coll.get("trackCount") or len(songs),
+                "release_date": _date(coll.get("releaseDate")), "genre": coll.get("primaryGenreName") or "",
+                "copyright": coll.get("copyright") or "", "explicit": coll.get("collectionExplicitness") == "explicit",
+                "artwork": art if art.startswith("https://") else "", "url": coll.get("collectionViewUrl") or "",
+                "total_ms": sum(t["ms"] or 0 for t in tracks), "tracks": tracks}
 
     async def releases(self, artist_id: str, storefront: str) -> list:
         data = await self._getter({"id": artist_id, "entity": "album", "country": storefront, "limit": 200, "sort": "recent"})

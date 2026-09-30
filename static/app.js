@@ -37,6 +37,9 @@ function keepFocus(fn) {
     if (el && el !== document.activeElement) el.focus({ preventScroll: true });
   }
 }
+const fmtDur = ms => { if (!ms) return ""; const s = Math.round(ms / 1000), h_ = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  return h_ ? `${h_}:${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}` : `${m}:${String(r).padStart(2, "0")}`; };
+const cover = (it, cls) => it.meta && it.meta.artwork ? h("img", { class: cls, src: it.meta.artwork, alt: cls === "cover" ? "cover art" : "", loading: "lazy", referrerpolicy: "no-referrer", onerror: e => e.target.remove() }) : "";
 const fmtBytes = n => n == null ? "?" : n >= 1e9 ? (n / 1e9).toFixed(1) + " GB" : n >= 1e6 ? (n / 1e6).toFixed(1) + " MB" : Math.round(n / 1e3) + " KB";
 
 // ---- icons (stroke icons, same style as lucide) -----------------------
@@ -71,7 +74,7 @@ const FILTERS = [
   ["stopped", "Stopped", "stop", i => i.status === "cancelled"],
   ["failed", "Failed", "alert", i => i.status === "error"],
 ];
-let S = null, offset = 0, filter = "all", query = "", dtab = "general", dopen = true, connected = false, logFilter = "all";
+let S = null, offset = 0, filter = "all", query = "", dtab = "tracks", dopen = true, connected = false, logFilter = "all";
 const sel = new Set();
 let anchor = null;
 let view = "queue", relFilter = "new", relRows = [], follows = [];
@@ -84,7 +87,8 @@ function visible() {
   return S.items.filter(f).filter(i => !q || [i.title, i.artist, i.url, i.original_url, i.status, STATUS[i.status]].join(" ").toLowerCase().includes(q));
 }
 const curItem = () => {
-  if (!S || !sel.size) return null;
+  if (!S) return null;
+  if (!sel.size) return S.items.find(i => RUNNING.includes(i.status)) || null;   // nothing selected: follow the running item
   return byId(sel.has(anchor) ? anchor : [...sel][0]) || null;
 };
 function caps() {
@@ -252,7 +256,7 @@ function nowText(it) {
   return t + (d ? " \u2014 " + countdown(d.label, d.until) : "");
 }
 let rowSig = null;
-const sigOf = items => items.map(i => [i.id, i.status, i.track_i, i.track_n, i.current_title, i.error_msg, i.attempts, i.not_before, i.title, i.artist, i.size_bytes, i.library_note, i.codec, (i.findings || []).length].join("|")).join("\n") + "#" + S.settings.track_retries;
+const sigOf = items => items.map(i => [i.id, i.status, i.track_i, i.track_n, i.current_title, i.meta ? 1 : 0, i.error_msg, i.attempts, i.not_before, i.title, i.artist, i.size_bytes, i.library_note, i.codec, (i.findings || []).length].join("|")).join("\n") + "#" + S.settings.track_retries;
 function renderRows() {
   const vis = visible(), frag = document.createDocumentFragment();
   rowSig = sigOf(S.items);
@@ -268,7 +272,7 @@ function renderRows() {
         if (e.key === "]") { sel.clear(); sel.add(it.id); anchor = it.id; priority("down"); }
       } },
       h("td", { class: "c-n" }, n + 1),
-      h("td", { class: "c-name", title: it.original_url || it.url }, h("div", {}, it.title || it.url),
+      h("td", { class: "c-name", title: it.original_url || it.url }, h("div", {}, cover(it, "thumb"), it.title || it.url),
         it.artist ? h("div", { class: "sub" }, it.artist) : "", trackLine(it) ? h("div", { class: "sub" }, "\u25b6 " + trackLine(it)) : "",
         it.error_msg ? h("div", { class: "sub" }, it.error_msg) : ""),
       h("td", { class: "c-status" }, h("span", { class: "chip st-" + it.status }, STATUS[it.status] || it.status)),
@@ -328,18 +332,24 @@ function trackTable(id) {
   if (!rows) return h("p", { class: "dim" }, "loading...");
   if (!rows.length) return h("p", { class: "dim" }, "no tracks yet.");
   return h("table", { class: "tracks" },
-    h("thead", {}, h("tr", {}, ["#", "status", "title", "note"].map(x => h("th", {}, x)))),
+    h("thead", {}, h("tr", {}, ["#", "status", "title", "artist", "length", "note"].map(x => h("th", {}, x)))),
     h("tbody", {}, rows.map(t => h("tr", {}, h("td", {}, t.idx), h("td", {}, h("span", { class: "chip st-" + (["error", "done", "downloading"].includes(t.status) ? t.status : "queued") }, t.status)),
-      h("td", { class: "c-name" }, t.title), h("td", { class: "dim" }, t.reason || "")))));
+      h("td", { class: "c-name" }, t.title), h("td", { class: "dim" }, t.artist && t.artist !== (byId(id) || {}).artist ? t.artist : ""),
+      h("td", {}, fmtDur(t.duration_ms)), h("td", { class: "dim" }, t.reason || "")))));
 }
 const kv = (k, v, cls = "") => h("div", { class: "r " + cls }, h("span", { class: "k" }, k), h("span", { class: "v sel-text" }, v));
 function generalPane(it) {
   const rel = (it.output_path || "").split(/[\\/]_gamdl-incoming[\\/]/)[1] || "";
   const smb = rel ? "\\\\192.168.18.225\\homelab\\hdd-backup\\music\\_gamdl-incoming\\" + rel.replaceAll("/", "\\") : "";
   const src = it.original_url || it.url;
+  const m = it.meta || {};
   const rows = [
     kv("Title", it.title || "-", "wide"),
     kv("Artist", [it.artist || "-", it.artist ? h("button", { type: "button", class: "tb", style: "margin-left:8px", title: "watch this artist for new releases", onclick: () => followFromItem(it) }, ico("bell", 12), "follow") : ""]),
+    ...(m.release_date ? [kv("Released", m.release_date)] : []),
+    ...(m.genre ? [kv("Genre", m.genre)] : []),
+    ...(m.total_ms ? [kv("Length", fmtDur(m.total_ms) + (m.explicit ? " \u00b7 explicit" : ""))] : []),
+    ...(m.copyright ? [kv("Label", m.copyright, "wide")] : []),
     kv("Link", h("a", { href: src, target: "_blank", rel: "noopener noreferrer" }, src)),
     kv("Status", [STATUS[it.status] || it.status, it.error_msg ? ` (${it.error_msg})` : ""]),
     ...(RUNNING.includes(it.status) ? [kv("Now", nowText(it), "wide")] : []),
@@ -349,7 +359,7 @@ function generalPane(it) {
     kv("Size", it.status === "done" ? fmtBytes(it.size_bytes) : "-"),
   ];
   if (it.output_path) rows.push(kv("Saved to", [h("code", {}, smb || it.output_path), smb ? h("button", { type: "button", class: "tb", style: "margin-left:8px", onclick: () => navigator.clipboard?.writeText(smb) }, ico("copy", 12), "copy") : ""], "wide"));
-  const out = [h("div", { class: "kv" }, rows)];
+  const out = [h("div", { class: "gen" }, cover(it, "cover"), h("div", { class: "kv" }, rows))];
   if (it.library_note) out.push(h("div", { class: "funfact" }, h("b", {}, "Fun fact: "), it.library_note));
   if (it.status === "done") out.push(it.findings.length ? h("ul", { class: "plain" }, it.findings.map(f => h("li", {}, f))) : h("p", { class: "dim" }, "no findings"));
   return out;

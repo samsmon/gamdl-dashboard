@@ -71,6 +71,7 @@ class BulkIn(BaseModel):
 def _public(item: dict, live=None) -> dict:
     out = dict(item)
     out["findings"] = json.loads(item["findings"]) if item.get("findings") else []
+    out["meta"] = json.loads(item["meta"]) if item.get("meta") else None
     if live is not None:
         out["live"] = live
     return out

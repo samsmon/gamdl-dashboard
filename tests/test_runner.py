@@ -449,3 +449,47 @@ async def test_missing_title_and_artist_are_filled_from_the_output_folder(env):
     await runner.step()
     it = store.get_item(b)
     assert it["title"] == "Keep me" and it["artist"] == "Me"  # only blanks are filled
+
+
+async def test_album_start_prefills_name_kind_artist_and_every_track_as_queued(env):
+    from app.releases import Itunes
+    runner, store, _, _ = env
+
+    async def getter(params):
+        coll = {"wrapperType": "collection", "collectionId": 1, "collectionName": "Fresh - Single", "artistName": "Someone", "trackCount": 3,
+                "releaseDate": "2026-05-01T07:00:00Z", "primaryGenreName": "Pop", "copyright": "\u2117 2026 Label X",
+                "artworkUrl100": "https://is1-ssl.mzstatic.com/a/100x100bb.jpg"}
+        songs = [{"wrapperType": "track", "kind": "song", "trackName": f"Song {i}", "trackNumber": i, "discNumber": 1, "trackTimeMillis": 1000 * i,
+                  "artistName": "Someone feat. Guest" if i == 2 else "Someone"} for i in (1, 2, 3)]
+        return {"results": [coll, *songs]}
+
+    runner.cfg.prefetch = True
+    runner.itunes = Itunes(getter=getter)
+    a = add(store, 1)
+    await runner._prefetch(store.get_item(a))
+    it = store.get_item(a)
+    assert it["title"] == "Fresh - Single" and it["artist"] == "Someone" and it["track_n"] == 3
+    assert [(t["idx"], t["title"], t["status"]) for t in store.list_tracks(a)] == [(1, "Song 1", "queued"), (2, "Song 2", "queued"), (3, "Song 3", "queued")]
+    import json
+    meta = json.loads(it["meta"])
+    assert meta["release_date"] == "2026-05-01" and meta["genre"] == "Pop" and meta["copyright"].endswith("Label X") and meta["total_ms"] == 6000
+    assert meta["artwork"] == "https://is1-ssl.mzstatic.com/a/300x300bb.jpg" and meta["kind"] == "single"
+    assert [(t["duration_ms"], t["artist"]) for t in store.list_tracks(a)] == [(1000, "Someone"), (2000, "Someone feat. Guest"), (3000, "Someone")]
+    await runner.step()  # the real run keeps the rows and moves them along
+    assert [t["status"] for t in store.list_tracks(a)] == ["done"] * 3
+    assert store.get_item(a)["title"] == "Fresh - Single"
+    assert [t["duration_ms"] for t in store.list_tracks(a)] == [1000, 2000, 3000]  # durations survive the status updates
+
+
+async def test_prefetch_failure_never_breaks_the_download(env):
+    from app.releases import Itunes
+    runner, store, _, _ = env
+
+    async def boom(params):
+        raise RuntimeError("apple is down")
+
+    runner.cfg.prefetch = True
+    runner.itunes = Itunes(getter=boom)
+    a = add(store, 1)
+    await runner.step()
+    assert store.get_item(a)["status"] == "done"

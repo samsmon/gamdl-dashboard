@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from app.api import create_app
 from app.bus import EventBus
 from app.config import Config
-from app.releases import Itunes, ReleaseError, Watcher, kind_of
+from app.releases import Itunes, ReleaseError, Watcher, display_title, kind_of
 
 NOW = 1_000_000.0
 ARTIST = {"wrapperType": "artist", "artistId": 111, "artistName": "Rokudenashi"}
@@ -29,6 +29,13 @@ class Fake:
         self.calls.append(dict(params))
         if self.fail:
             raise self.fail
+        if params.get("entity") == "song":
+            a = next((x for x in self.albums if str(x["collectionId"]) == str(params["id"])), None)
+            if not a:
+                return {"results": []}
+            songs = [{"wrapperType": "track", "kind": "song", "trackName": f"Song {i}", "trackNumber": i, "discNumber": 1, "trackTimeMillis": 1000 * i}
+                     for i in range(1, (a["trackCount"] or 1) + 1)]
+            return {"results": [a, *songs]}
         if params.get("entity") == "album":
             return {"results": [ARTIST, *self.albums]}
         ident = str(params["id"])
@@ -194,3 +201,30 @@ def test_api_dismiss_restore_unfollow_and_validation(client):
 def test_api_follow_reports_apple_failure_as_502(client):
     client.fake.fail = RuntimeError("down")
     assert client.post("/api/follows", json={"input": "111"}).status_code == 502
+
+
+def test_display_title_always_carries_the_kind():
+    assert display_title("Living - Single", "single") == "Living - Single"
+    assert display_title("\u65e5\u9670 - EP", "ep") == "\u65e5\u9670 - EP"
+    assert display_title("Frozen Flower", "album") == "Frozen Flower - Album"
+
+
+async def test_album_metadata_includes_the_full_track_list(fake):
+    meta = await Itunes(getter=fake).album("901", "jp")
+    assert meta == {"name": "Living - Single", "kind": "single", "artist": "Rokudenashi", "track_count": 1,
+                    "release_date": "2026-02-04", "genre": "", "copyright": "\u2117 2026 Rokudenashi", "explicit": False, "artwork": "", "url": "",
+                    "total_ms": 1000, "tracks": [{"n": 1, "title": "Song 1", "ms": 1000, "artist": "", "explicit": False}]}
+    assert len((await Itunes(getter=fake).album("900", "jp"))["tracks"]) == 17
+    assert await Itunes(getter=fake).album("424242", "jp") is None
+
+
+async def test_album_metadata_artwork_genre_and_explicit(fake):
+    a = coll(960, "Loud - EP", "2026-03-03", 2)
+    a.update(primaryGenreName="J-Pop", collectionExplicitness="explicit", artworkUrl100="https://is1-ssl.mzstatic.com/image/thumb/x/100x100bb.jpg",
+             collectionViewUrl="https://music.apple.com/jp/album/960")
+    fake.albums.append(a)
+    m = await Itunes(getter=fake).album("960", "jp")
+    assert m["genre"] == "J-Pop" and m["explicit"] and m["kind"] == "ep" and m["total_ms"] == 3000
+    assert m["artwork"] == "https://is1-ssl.mzstatic.com/image/thumb/x/300x300bb.jpg"
+    a["artworkUrl100"] = "javascript:alert(1)"
+    assert (await Itunes(getter=fake).album("960", "jp"))["artwork"] == ""  # only https artwork is ever handed to the UI
