@@ -1,5 +1,5 @@
 from app.guard import Guard
-from app.parser import Line, TrackDelay
+from app.parser import Line, TrackDelay, TrackError
 
 
 def err(cls, level="ERROR"):
@@ -37,3 +37,25 @@ def test_reset():
     g.on_event(err("rate_limit"))
     g.reset()
     assert g.consecutive == 0
+
+
+def test_consecutive_track_errors_give_verdict_without_text():
+    g = Guard(3)
+    assert g.on_event(TrackError("a")) is None
+    assert g.on_event(TrackError("b")) is None
+    v = g.on_event(TrackError("c"))
+    assert v.kind == "rate_limited" and "3 consecutive track errors" in v.reason
+
+
+def test_track_delay_resets_track_error_count():
+    g = Guard(3)
+    g.on_event(TrackError("a")); g.on_event(TrackError("b"))
+    g.on_event(TrackDelay(5))
+    assert g.on_event(TrackError("c")) is None
+
+
+def test_reset_clears_track_errors():
+    g = Guard(2)
+    g.on_event(TrackError("a"))
+    g.reset()
+    assert g.on_event(TrackError("b")) is None

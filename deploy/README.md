@@ -7,7 +7,7 @@ from the separate homelab-ops repo: `git pull` there, take a lock in
 ## Manual steps (for the user, not executed)
 
 1. Copy this repo to `/opt/gamdl-dashboard` on media-hosts (LXC 104).
-2. Create the venv: `python3 -m venv .venv`, then `.venv/bin/pip install .`.
+2. Create the venv: `python3 -m venv .venv`, then `.venv/bin/pip install -e .` (editable: the checkout must stay in place, because `static/` is served from the repo root).
 3. Make sure `ffprobe` is on the server PATH (apt package `ffmpeg`). Codec detection needs it.
 4. Copy `deploy/gamdl-dashboard.service` to `/etc/systemd/system/`.
 5. `systemctl daemon-reload && systemctl enable --now gamdl-dashboard`.

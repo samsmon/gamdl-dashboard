@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Stand-in for gamdl-safe used by tests and local dev. Scenario via FAKE_SCENARIO:
-ok | rate_limit | auth | slow | crash | busy | flaky | fail. Never talks to the network.
+ok | rate_limit | auth | slow | crash | busy | flaky | fail | errors_no_text | traceback_429. Never talks to the network.
 flaky/fail: track 2 raises a non-rate-limit error ("read timeout"); flaky succeeds on the next
 run when FAKE_STATE points at a file path that survives between runs."""
 import os
@@ -38,6 +38,15 @@ for i in range(1, tracks + 1):
     if scenario == "rate_limit":
         say(f'[ERROR    19:00:{i:02d}] Error downloading "Song {i}": HTTP 429 Too Many Requests\n')
         continue
+    if scenario == "errors_no_text":
+        say(f'[ERROR    19:00:{i:02d}] Error downloading "Song {i}"\n')
+        continue
+    if scenario == "traceback_429" and i == 1:
+        say('[ERROR    19:00:01] Error downloading "Song 1"\n')
+        for _ in range(3):
+            say("httpx.HTTPStatusError: Client error '429 Too Many Requests'\n")
+        time.sleep(30)
+        continue
     if scenario in ("flaky", "fail") and i == 2:
         # "flaky" fails track 2 only the first time (state file), "fail" fails it every time
         state = os.environ.get("FAKE_STATE")
@@ -63,5 +72,5 @@ for i in range(1, tracks + 1):
         time.sleep(float(os.environ.get("FAKE_SLOW", "0.5")))
     if scenario == "crash":
         sys.exit(3)
-n_err = tracks if scenario == "rate_limit" else failed
+n_err = tracks if scenario in ("rate_limit", "errors_no_text") else failed
 say(f"[INFO     19:00:59] Finished with {n_err} error(s)\n")

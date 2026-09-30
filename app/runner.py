@@ -47,6 +47,7 @@ class Runner:
         self._pause_after_track = False
         self._cancel = False
         self._run = None
+        self._last_level = "INFO"
 
     # ---- control -------------------------------------------------------
     def _state(self):
@@ -221,6 +222,7 @@ class Runner:
         self.guard.threshold = s["error_threshold"]
         self.current_id, self.live = iid, {"track_pct": 0.0}
         self._pause_after_track = self._cancel = False
+        self._last_level = "INFO"
         self.store.clear_tracks(iid)
         self.store.update_item(iid, status="downloading", started_at=self._clock(), finished_at=None,
                                error_msg=None, errors=0, track_i=None, track_n=None, findings=None)
@@ -286,7 +288,7 @@ class Runner:
             pass
 
     def _on_line(self, iid, raw, run):
-        for ev in parse_line(raw):
+        for ev in parse_line(raw, self._last_level):
             if isinstance(ev, (TrackStart, TrackSkip, TrackError, TrackDelay)):
                 self.bus.publish({"type": "tracks", "item_id": iid})  # UI reloads the open track list
             v = self.guard.on_event(ev)
@@ -328,6 +330,7 @@ class Runner:
             elif isinstance(ev, Finished):
                 run.finished = ev.errors
             elif isinstance(ev, Line):
+                self._last_level = ev.level
                 if "already running" in ev.text:
                     run.busy = True
                 self.store.add_log(iid, ev.level, ev.text, self._clock())
@@ -355,14 +358,14 @@ class Runner:
     async def _finish(self, item, run, rc):
         iid, now = item["id"], self._clock()
         fields: dict = {"finished_at": now}
-        if run.busy:
+        if run.verdict:  # 429/403/auth always wins (even over a user cancel): never retried automatically
+            fields.update(status="cancelled" if self._cancel else "queued", error_msg=run.verdict.reason)
+            self._halt(run.verdict.kind, run.verdict.reason)
+        elif run.busy:
             fields.update(status="queued")
             self._halt("busy", "another gamdl-safe instance holds the lock")
         elif self._cancel:
             fields.update(status="cancelled")
-        elif run.verdict:  # 429/403/auth always wins: never retried automatically
-            fields.update(status="queued", error_msg=run.verdict.reason)
-            self._halt(run.verdict.kind, run.verdict.reason)
         elif run.paused_stop or self._stopping:
             fields.update(status="queued")
         elif rc == 0 and run.finished is not None:

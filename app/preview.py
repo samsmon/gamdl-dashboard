@@ -4,6 +4,7 @@ import json
 import random
 import re
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 from app.library import RemoteAlbum
 
@@ -28,7 +29,9 @@ class Preview:
 
 
 def parse_iso_duration(s):
-    m = _ISO.match(s or "")
+    if not isinstance(s, str):
+        return None
+    m = _ISO.match(s)
     if not m or not any(m.groups()):
         return None
     h, mi, sec = m.groups()
@@ -38,7 +41,21 @@ def parse_iso_duration(s):
 def _artist(by) -> str:
     if isinstance(by, list):
         by = by[0] if by else {}
-    return by.get("name", "") if isinstance(by, dict) else str(by or "")
+    if isinstance(by, dict):
+        return _text(by.get("name"))
+    return _text(by)
+
+
+def _text(v) -> str:
+    return v if isinstance(v, str) else ""
+
+
+def _count(v):
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, str) and v.strip().isdigit():
+        v = int(v.strip())
+    return v if isinstance(v, int) and v > 0 else None
 
 
 def parse_page(page: str):
@@ -50,12 +67,12 @@ def parse_page(page: str):
         for d in data if isinstance(data, list) else [data]:
             if isinstance(d, dict) and d.get("@type") in ("MusicAlbum", "MusicPlaylist"):
                 listed = [t for t in d.get("track", []) if isinstance(t, dict)] if isinstance(d.get("track"), list) else []
-                tracks = d.get("numTracks")
+                tracks = _count(d.get("numTracks"))
                 if tracks is None and listed:
                     tracks = len(listed)
                 year = str(d.get("datePublished", ""))[:4] or None
-                return Preview(d.get("name", ""), _artist(d.get("byArtist")), tracks, year, "web",
-                               [t.get("name", "") for t in listed], [parse_iso_duration(t.get("duration")) for t in listed])
+                return Preview(_text(d.get("name")), _artist(d.get("byArtist")), tracks, year, "web",
+                               [_text(t.get("name")) for t in listed], [parse_iso_duration(t.get("duration")) for t in listed])
     m = _OG.search(page)
     if m:
         title = htmllib.unescape(m[1]).removesuffix(" on Apple Music").strip()
@@ -63,12 +80,19 @@ def parse_page(page: str):
     return None
 
 
+def _host_allowed(url: str) -> bool:
+    host = (urlsplit(str(url)).hostname or "").lower()
+    return host == "apple.com" or host.endswith(".apple.com")
+
+
 async def _default_getter(url: str) -> str:
     import httpx
     headers = {"User-Agent": _UA, "Accept-Language": "ja-JP,ja;q=0.9"}
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers=headers) as c:
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True, max_redirects=3, headers=headers) as c:
         r = await c.get(url)
         r.raise_for_status()
+        if not all(_host_allowed(str(x.url)) for x in [*r.history, r]):
+            raise ValueError("redirected outside apple.com")
         return r.text
 
 

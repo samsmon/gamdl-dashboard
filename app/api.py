@@ -6,6 +6,7 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -82,6 +83,15 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     app = FastAPI(lifespan=lifespan)
 
+    @app.middleware("http")
+    async def refuse_cross_origin_writes(request: Request, call_next):
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            origin = request.headers.get("origin")
+            foreign = origin is not None and urlsplit(origin).netloc.lower() != request.headers.get("host", "").lower()
+            if foreign or request.headers.get("sec-fetch-site") == "cross-site":
+                return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
+        return await call_next(request)
+
     def storefront() -> str:
         return store.get_settings()["storefront"]
 
@@ -126,16 +136,20 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         svc = app.state.previews
         pv = await svc.fetch(p)
         s = store.get_settings()
-        lib = await asyncio.to_thread(library.match, pv.remote(), s["library_exact"], s["library_similar"])
-        source = "metadata"
-        if lib.status == "unavailable" and pv.title:
-            # metadata.csv unreadable: fall back to names from catalog.sqlite, which can never say "in library"
-            cm = await asyncio.to_thread(catalog.match, pv.artist, pv.title)
-            source = "catalog"
-            hit = cm.level in ("exact", "likely")
-            lib = LibraryMatch("similar" if hit else "new", 0.0, "", cm.paths[0] if hit else "",
-                               cm.lossless if hit else None, ["metadata.csv unavailable: catalog names only"])
-        stg = await asyncio.to_thread(staging_match, cfg.staging_dir, pv.artist, pv.title) if pv.title else None
+        source, stg = "metadata", None
+        try:
+            lib = await asyncio.to_thread(library.match, pv.remote(), s["library_exact"], s["library_similar"])
+            if lib.status == "unavailable" and pv.title:
+                # metadata.csv unreadable: fall back to names from catalog.sqlite, which can never say "in library"
+                cm = await asyncio.to_thread(catalog.match, pv.artist, pv.title)
+                source = "catalog"
+                hit = cm.level in ("exact", "likely")
+                lib = LibraryMatch("similar" if hit else "new", 0.0, "", cm.paths[0] if hit else "",
+                                   cm.lossless if hit else None, ["metadata.csv unavailable: catalog names only"])
+            stg = await asyncio.to_thread(staging_match, cfg.staging_dir, pv.artist, pv.title) if pv.title else None
+        except Exception:  # a broken library/catalog must never turn a preview into a 500
+            lib = LibraryMatch("unknown", 0.0, "", "", None, ["library check failed"])
+            source, stg = "metadata", None
         status = lib.status
         if status in ("new", "unknown", "unavailable") and stg and stg.level != "none":
             status = "in_staging"
@@ -201,6 +215,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         elif action in ("retry", "retry_original"):
             if running:
                 raise HTTPException(409, "item is running")
+            other = store.find_by_key(item["kind"], item["ext_id"], item["track_id"])
+            if other and other["id"] != item_id:
+                raise HTTPException(409, f"already queued as item {other['id']}")
             fields = {"status": "queued", "error_msg": None, "errors": 0, "attempts": 0, "not_before": None}
             if action == "retry_original":
                 try:

@@ -202,3 +202,41 @@ def test_pcache_is_capped(client, monkeypatch):
         client.post("/api/preview", json={"url": f"https://music.apple.com/jp/album/{n}"})
     keys = list(client.app.state.pcache)
     assert len(keys) == 3 and keys[-1].endswith("/15")
+
+
+def test_cross_origin_writes_refused(client):
+    bad = {"Origin": "http://evil.example"}
+    r = client.post("/api/resume", headers=bad)
+    assert r.status_code == 403 and r.json() == {"detail": "cross-origin request refused"}
+    assert client.put("/api/settings", json={"track_delay": "3-5"}, headers=bad).status_code == 403
+    assert client.post("/api/resume", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
+
+
+def test_same_origin_and_no_origin_writes_allowed(client):
+    assert client.post("/api/resume", headers={"Origin": "http://testserver"}).status_code == 200
+    assert client.post("/api/resume", headers={"Origin": "http://testserver", "Sec-Fetch-Site": "same-origin"}).status_code == 200
+    assert client.post("/api/resume").status_code == 200
+    assert client.get("/api/state", headers={"Origin": "http://evil.example"}).status_code == 200
+
+
+def test_preview_never_500_when_library_match_raises(client, monkeypatch):
+    import app.library as lib
+    async def getter(url): return album_page()
+    client.app.state.previews._get = getter
+    client.app.state.previews._delay = (0, 0)
+    def boom(*a, **k): raise RuntimeError("bad csv")
+    monkeypatch.setattr(lib.Library, "match", boom)
+    r = client.post("/api/preview", json={"url": "https://music.apple.com/jp/album/1"})
+    assert r.status_code == 200 and r.json()["library"]["status"] == "unknown"
+
+
+def test_retry_refused_when_same_album_already_queued(client):
+    from app.store import Store
+    url = "https://music.apple.com/jp/album/77"
+    a = q(client, url)["results"][0]["id"]
+    st = Store(client.cfg.db_path)
+    st.update_item(a, status="cancelled")
+    b = q(client, url)["results"][0]["id"]
+    for action in ("retry", "retry_original"):
+        r = client.post(f"/api/queue/{a}/{action}")
+        assert r.status_code == 409 and r.json()["detail"] == f"already queued as item {b}"

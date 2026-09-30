@@ -361,3 +361,39 @@ async def test_skip_event_marks_track_skipped(env):
     await runner.step()
     t2 = [t for t in store.list_tracks(a) if t["idx"] == 2][0]
     assert t2["status"] == "skipped" and "file exists" in t2["reason"]
+
+
+async def test_errors_without_429_text_still_halt(env):
+    runner, store, _, mp = env
+    store.put_settings({"track_retries": 2})
+    mp.setenv("FAKE_SCENARIO", "errors_no_text")
+    mp.setenv("FAKE_TRACKS", "6")
+    a = add(store, 1)
+    await runner.step()
+    it = store.get_item(a)
+    assert it["status"] == "queued" and it["attempts"] == 0 and it["not_before"] is None
+    assert store.get_banner()["kind"] == "rate_limited" and store.get_flag("paused") == "1"
+    assert await runner.step() is False
+
+
+async def test_traceback_429_lines_halt(env):
+    runner, store, _, mp = env
+    store.put_settings({"track_retries": 2})
+    mp.setenv("FAKE_SCENARIO", "traceback_429")
+    mp.setenv("FAKE_TRACKS", "6")
+    a = add(store, 1)
+    await runner.step()
+    it = store.get_item(a)
+    assert it["status"] == "queued" and it["attempts"] == 0
+    assert store.get_banner()["kind"] == "rate_limited" and store.get_flag("paused") == "1"
+
+
+async def test_verdict_halts_even_when_user_cancelled(env):
+    from app.guard import Verdict
+    from app.runner import _Run
+    runner, store, _, _ = env
+    a = add(store, 1)
+    runner._cancel = True
+    await runner._finish(store.get_item(a), _Run(verdict=Verdict("rate_limited", "storm")), 0)
+    assert store.get_item(a)["status"] == "cancelled"
+    assert store.get_banner()["kind"] == "rate_limited" and store.get_flag("paused") == "1"

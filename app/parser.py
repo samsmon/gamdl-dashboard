@@ -83,7 +83,7 @@ def classify(level: str, body: str) -> str:
     return "other"
 
 
-def parse_line(raw: str) -> list:
+def parse_line(raw: str, prev_level: str = "INFO") -> list:
     text = ANSI.sub("", raw).strip()
     if not text:
         return []
@@ -99,6 +99,8 @@ def parse_line(raw: str) -> list:
     lm = _LEVEL.match(text)
     if lm:
         level, body = lm[1], lm[2]
+    elif not events and prev_level in ("WARNING", "ERROR", "CRITICAL"):  # unprefixed continuation (traceback) line
+        level = prev_level
     if (m := _URL.search(body)):
         events.append(UrlStart(int(m[1]), int(m[2]), m[3]))
     elif (m := _TRACK.search(body)):

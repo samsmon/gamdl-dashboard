@@ -74,3 +74,11 @@ def test_splitter_handles_cr_and_split_reads():
     assert s.feed("0% of 5MiB\rnext\nlast") == ["[download]  2.0% of 5MiB", "next"]
     assert s.flush() == ["last"]
     assert s.flush() == []
+
+
+def test_unprefixed_traceback_inherits_error_level():
+    line = "httpx.HTTPStatusError: Client error '429 Too Many Requests'"
+    ln = parse_line(line, prev_level="ERROR")[-1]
+    assert ln.level == "ERROR" and ln.cls == "rate_limit"
+    assert parse_line(line, prev_level="INFO")[-1].cls == "other"
+    assert parse_line(line)[-1].cls == "other"

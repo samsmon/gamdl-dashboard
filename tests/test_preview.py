@@ -72,3 +72,25 @@ async def test_fetch_serializes_with_delay_and_survives_errors():
     svc2 = PreviewService(getter=failing, sleep=sleep, rand=lambda a, b: a)
     r = await svc2.fetch(a)
     assert r == Preview("", "", None, None, "none")
+
+
+def test_parse_page_coerces_odd_jsonld_values():
+    ld = {"@type": "MusicAlbum", "name": {"x": 1}, "byArtist": {"name": 5}, "numTracks": "5",
+          "track": [{"name": 7, "duration": 123}, {"name": "b", "duration": "PT1M"}]}
+    p = parse_page(f'<script type="application/ld+json">{json.dumps(ld)}</script>')
+    assert p.title == "" and p.artist == "" and p.tracks == 5
+    assert p.track_titles == ["7", "b"] or p.track_titles == ["", "b"]
+    assert p.durations == [None, 60.0]
+    ld["numTracks"] = {"n": 1}
+    assert parse_page(f'<script type="application/ld+json">{json.dumps(ld)}</script>').tracks == 2
+    assert parse_iso_duration(123) is None
+
+
+def test_host_allowed():
+    from app.preview import _host_allowed
+    assert _host_allowed("https://music.apple.com/jp/album/1")
+    assert _host_allowed("https://classical.music.apple.com/x")
+    assert _host_allowed("https://foo.apple.com/x")
+    assert not _host_allowed("https://evil.example/x")
+    assert not _host_allowed("https://apple.com.evil.example/x")
+    assert not _host_allowed("https://notapple.com/x")
