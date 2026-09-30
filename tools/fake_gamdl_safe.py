@@ -27,6 +27,9 @@ if scenario == "busy":
 say(f'[INFO     19:00:00] URL   1/1  Processing "{url}"\n')
 failed = 0
 for i in range(1, tracks + 1):
+    if scenario == "skip" and i == 2:
+        say('[WARNING  19:00:02] [Track   2/3  ] Skipping "Song 2": file exists\n')
+        continue
     say(f'[INFO     19:00:{i:02d}] [Track {i:3d}/{tracks:<3d}] Downloading "Song {i}"\n')
     for pct in ("10.0", "55.5", "100.0"):
         say(f"[download]  {pct}% of ~ 5.00MiB at 1.00MiB/s (frag 1/2)\r")

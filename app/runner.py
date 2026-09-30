@@ -1,5 +1,6 @@
 import asyncio
 import codecs
+import json
 import os
 import random
 import signal
@@ -23,8 +24,6 @@ class _Run:
     busy: bool = False
     verdict: object = None
     paused_stop: bool = False
-    tracks_done: int = 0
-    last_lines: list = None
 
 
 def _group_kwargs() -> dict:
@@ -47,6 +46,7 @@ class Runner:
         self._last_finish = None
         self._pause_after_track = False
         self._cancel = False
+        self._run = None
 
     # ---- control -------------------------------------------------------
     def _state(self):
@@ -57,12 +57,17 @@ class Runner:
 
     def stop(self):
         self._stopping = True
+        self._signal(signal.SIGTERM)
         self._wake.set()
 
     async def pause(self):
         self.store.set_flag("paused", "1")
         if self.proc is not None:
-            self._pause_after_track = True
+            if self.live.get("delay_kind") == "track" and self._run is not None:
+                self._run.paused_stop = True
+                self._signal(signal.SIGTERM)
+            else:
+                self._pause_after_track = True
         self._state()
 
     async def resume(self):
@@ -86,7 +91,15 @@ class Runner:
 
     async def run_forever(self):
         while not self._stopping:
-            if not await self.step():
+            try:
+                ran = await self.step()
+            except Exception as e:
+                try:
+                    self.store.add_log(None, "ERROR", f"runner error: {type(e).__name__}: {e}", self._clock())
+                except Exception:
+                    pass
+                ran = False
+            if not ran:
                 self._wake.clear()
                 try:
                     await asyncio.wait_for(self._wake.wait(), timeout=2)
@@ -139,8 +152,11 @@ class Runner:
             return True
 
     async def _album_delay(self, item) -> bool:
-        if self._last_finish is None:
-            return True
+        if self._last_finish is None:  # after a restart, seed from the store so the delay is not skipped
+            done = [i["finished_at"] for i in self.store.list_items() if i["finished_at"]]
+            if not done:
+                return True
+            self._last_finish = max(done)
         lo, hi = parse_range(self.store.get_settings()["album_delay"])
         remaining = self._rand(lo, hi) - (self._clock() - self._last_finish)
         if remaining <= 0:
@@ -162,7 +178,8 @@ class Runner:
             return True
         finally:
             self.current_id, self.live = None, {}
-            if self.store.get_item(item["id"])["status"] == "waiting":
+            cur = self.store.get_item(item["id"])
+            if cur and cur["status"] == "waiting":
                 self.store.update_item(item["id"], status="queued")
             self._state()
 
@@ -174,13 +191,14 @@ class Runner:
         try:
             if os.name == "posix":
                 os.killpg(p.pid, sig)
-            elif sig == signal.SIGTERM:
-                p.terminate()
             else:
-                p.kill()
-        except (ProcessLookupError, PermissionError):
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
+        except (OSError, subprocess.SubprocessError):
             return
-        asyncio.get_running_loop().create_task(self._kill_later(p))
+        try:
+            asyncio.get_running_loop().create_task(self._kill_later(p))
+        except RuntimeError:
+            pass
 
     async def _kill_later(self, p):
         try:
@@ -190,8 +208,8 @@ class Runner:
                 if os.name == "posix":
                     os.killpg(p.pid, signal.SIGKILL)
                 else:
-                    p.kill()
-            except (ProcessLookupError, PermissionError):
+                    subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
+            except (OSError, subprocess.SubprocessError):
                 pass
 
     async def _run_item(self, item):
@@ -217,19 +235,55 @@ class Runner:
             self._halt("gamdl_missing", f"cannot start {self.cfg.gamdl_cmd[0]}")
             self.current_id, self.live = None, {}
             return
-        run = _Run(last_lines=[])
-        splitter, dec = LineSplitter(), codecs.getincrementaldecoder("utf-8")(errors="replace")
-        while True:
-            chunk = await self.proc.stdout.read(4096)
-            if not chunk:
-                break
-            for line in splitter.feed(dec.decode(chunk)):
+        run = self._run = _Run()
+        proc = self.proc
+        try:
+            splitter, dec = LineSplitter(), codecs.getincrementaldecoder("utf-8")(errors="replace")
+            while True:
+                chunk = await proc.stdout.read(4096)
+                if not chunk:
+                    break
+                for line in splitter.feed(dec.decode(chunk)):
+                    self._on_line(iid, line, run)
+            for line in splitter.flush():
                 self._on_line(iid, line, run)
-        for line in splitter.flush():
-            self._on_line(iid, line, run)
-        rc = await self.proc.wait()
-        self.proc = None
-        await self._finish(item, run, rc)
+            rc = await proc.wait()
+            self.proc = None
+            await self._finish(item, run, rc)
+        except asyncio.CancelledError:
+            await self._abort(proc, iid, "queued")
+            raise
+        except Exception as e:
+            try:
+                self.store.add_log(iid, "ERROR", f"internal error: {type(e).__name__}: {e}", self._clock())
+            except Exception:
+                pass
+            await self._abort(proc, iid, "error", f"internal error: {type(e).__name__}")
+            try:
+                self._halt("internal_error", f"{type(e).__name__} while running item {iid}")
+            except Exception:
+                pass
+        finally:
+            self.proc, self._run = None, None
+            self.current_id, self.live = None, {}
+            self._cancel = self._pause_after_track = False
+
+    async def _abort(self, proc, iid, status, msg=None):
+        """Terminate the child and settle the item; never raises (except cancellation while waiting)."""
+        self._signal(signal.SIGTERM)
+        try:
+            await asyncio.wait_for(asyncio.shield(proc.wait()), 5)
+        except BaseException:
+            pass
+        try:
+            fields = {"status": status, "finished_at": self._clock()}
+            if msg:
+                fields["error_msg"] = msg
+            self.store.update_item(iid, **fields)
+            self._last_finish = self._clock()
+            self._state()
+        except Exception:
+            pass
 
     def _on_line(self, iid, raw, run):
         for ev in parse_line(raw):
@@ -262,7 +316,6 @@ class Runner:
                 if cur and cur["track_i"]:
                     self.store.upsert_track(iid, cur["track_i"], cur["current_title"], "done")
                 self.store.record_track(self._clock())
-                run.tracks_done += 1
                 self.live = {"track_pct": 100.0, "delay_kind": "track", "delay_until": self._clock() + ev.seconds}
                 self.store.update_item(iid, status="waiting")
                 self._progress(iid)
@@ -310,12 +363,15 @@ class Runner:
         elif run.verdict:  # 429/403/auth always wins: never retried automatically
             fields.update(status="queued", error_msg=run.verdict.reason)
             self._halt(run.verdict.kind, run.verdict.reason)
-        elif run.paused_stop:
+        elif run.paused_stop or self._stopping:
             fields.update(status="queued")
         elif rc == 0 and run.finished is not None:
             errors = max(run.errors, run.finished)
             if errors == 0:
-                fields.update(await asyncio.to_thread(self._describe_output, item))
+                try:
+                    fields.update(await asyncio.to_thread(self._describe_output, item))
+                except Exception as e:
+                    fields["findings"] = json.dumps([f"post-download check failed: {type(e).__name__}"])
                 fields.update(status="done", errors=0, not_before=None)
                 self.guard.reset()
             else:
@@ -329,7 +385,6 @@ class Runner:
         self._state()
 
     def _describe_output(self, item) -> dict:
-        import json
         cur = self.store.get_item(item["id"])
         dirs = checker.find_output_dirs(self.cfg.staging_dir, cur["started_at"] or 0)
         if not dirs:

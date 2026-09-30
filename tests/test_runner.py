@@ -67,6 +67,8 @@ async def test_concurrent_steps_are_serialized(env):
     a, b = add(store, 1), add(store, 2)
     await asyncio.gather(runner.step(), runner.step())
     assert store.get_item(a)["status"] == "done" and store.get_item(b)["status"] == "done"
+    ia, ib = store.get_item(a), store.get_item(b)
+    assert ia["finished_at"] <= ib["started_at"]
 
 
 async def test_rate_limit_auto_pauses_and_requeues(env):
@@ -225,3 +227,137 @@ async def test_track_delay_and_skip_events_update_store(env):
     await runner.step()
     log = " ".join(r["text"] for r in store.tail_log(50))
     assert "Downloading" in log and "track delay" in log
+
+
+async def _until(cond, timeout=10):
+    import asyncio
+    end = asyncio.get_running_loop().time() + timeout
+    while not cond():
+        assert asyncio.get_running_loop().time() < end, "timed out"
+        await asyncio.sleep(0.01)
+
+
+async def test_pause_mid_run_requeues_and_stops(env):
+    import asyncio
+    runner, store, _, mp = env
+    mp.setenv("FAKE_SCENARIO", "slow")
+    mp.setenv("FAKE_SLOW", "0.5")
+    mp.setenv("FAKE_TRACKS", "5")
+    a = add(store, 1)
+    t = asyncio.create_task(runner.step())
+    await _until(lambda: runner.live.get("delay_kind") == "track")
+    await runner.pause()
+    await t
+    assert store.get_item(a)["status"] == "queued"
+    assert store.get_flag("paused") == "1"
+    assert store.count_tracks_since(0) <= 2
+    assert runner.proc is None and runner.current_id is None
+
+
+async def test_cancel_running_item(env):
+    import asyncio
+    runner, store, _, mp = env
+    mp.setenv("FAKE_SCENARIO", "slow")
+    mp.setenv("FAKE_SLOW", "0.5")
+    a = add(store, 1)
+    t = asyncio.create_task(runner.step())
+    await _until(lambda: runner.proc is not None and runner.live)
+    await runner.cancel(a)
+    await t
+    assert store.get_item(a)["status"] == "cancelled"
+    assert runner.proc is None and runner.current_id is None
+
+
+async def test_cancel_during_album_delay_never_starts(env):
+    runner, store, sleeps, _ = env
+    a, b = add(store, 1), add(store, 2)
+    await runner.step()
+
+    async def cancelling_sleep(s):
+        sleeps.append(s)
+        await runner.cancel(b)
+
+    runner._sleep = cancelling_sleep
+    await runner.step()
+    it = store.get_item(b)
+    assert it["status"] == "cancelled" and it["started_at"] is None
+    assert runner.proc is None
+
+
+async def test_internal_error_kills_child_and_pauses(env):
+    runner, store, _, mp = env
+    mp.setenv("FAKE_SCENARIO", "slow")
+    a = add(store, 1)
+
+    def boom(*args, **kw):
+        raise RuntimeError("boom")
+
+    mp.setattr(runner, "_on_line", boom)
+    await runner.step()  # must not raise
+    it = store.get_item(a)
+    assert it["status"] == "error" and it["error_msg"] == "internal error: RuntimeError"
+    assert store.get_banner()["kind"] == "internal_error" and store.get_flag("paused") == "1"
+    assert runner.proc is None and runner.current_id is None
+    assert await runner.step() is False
+
+
+async def test_describe_output_failure_still_marks_done(env):
+    runner, store, _, mp = env
+
+    def boom(item):
+        raise ValueError("x")
+
+    mp.setattr(runner, "_describe_output", boom)
+    a = add(store, 1)
+    await runner.step()
+    it = store.get_item(a)
+    assert it["status"] == "done" and "post-download check failed: ValueError" in it["findings"]
+
+
+async def test_stop_terminates_running_child_and_requeues(env):
+    import asyncio
+    runner, store, _, mp = env
+    mp.setenv("FAKE_SCENARIO", "slow")
+    mp.setenv("FAKE_SLOW", "5")
+    a = add(store, 1)
+    t = asyncio.create_task(runner.step())
+    await _until(lambda: runner.proc is not None and runner.live)
+    runner.stop()
+    await asyncio.wait_for(t, 10)
+    assert store.get_item(a)["status"] == "queued"
+    assert runner.proc is None
+
+
+async def test_task_cancellation_terminates_child_and_requeues(env):
+    import asyncio
+    runner, store, _, mp = env
+    mp.setenv("FAKE_SCENARIO", "slow")
+    mp.setenv("FAKE_SLOW", "5")
+    a = add(store, 1)
+    t = asyncio.create_task(runner.step())
+    await _until(lambda: runner.proc is not None and runner.live)
+    proc = runner.proc
+    t.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await t
+    assert store.get_item(a)["status"] == "queued"
+    assert runner.proc is None and proc.returncode is not None
+
+
+async def test_album_delay_survives_restart(env):
+    runner, store, sleeps, _ = env
+    a = add(store, 1)
+    store.update_item(a, status="done", finished_at=NOW - 10)
+    add(store, 2)
+    assert runner._last_finish is None
+    assert await runner.step() is True
+    assert sum(sleeps) == 50
+
+
+async def test_skip_event_marks_track_skipped(env):
+    runner, store, _, mp = env
+    mp.setenv("FAKE_SCENARIO", "skip")
+    a = add(store, 1)
+    await runner.step()
+    t2 = [t for t in store.list_tracks(a) if t["idx"] == 2][0]
+    assert t2["status"] == "skipped" and "file exists" in t2["reason"]
