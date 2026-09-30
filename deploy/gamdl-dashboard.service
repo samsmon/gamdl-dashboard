@@ -4,7 +4,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-# @REPO@ and @USER_LINE@ are filled in by deploy/install.sh
+# Placeholders in this template are filled in by deploy/install.sh
 WorkingDirectory=@REPO@
 EnvironmentFile=/etc/gamdl-dashboard.env
 ExecStart=@REPO@/.venv/bin/python -m app
