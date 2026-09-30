@@ -1,5 +1,8 @@
 import json
 import os
+import statistics
+import subprocess
+from collections import Counter
 from pathlib import Path
 
 RULES_PATH = Path(__file__).with_name("checker_rules.json")
@@ -84,3 +87,51 @@ def check_album(album: Path, expected_tracks, rules: dict | None = None) -> list
     if rules.get("require_romaji_kanji") and not artist.isascii() and "(" not in artist:
         findings.append("artist folder lacks 'Romaji (Kanji)' form (naming for manual move)")
     return findings
+
+
+def detect_codec(path, run=subprocess.run):
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+           "stream=codec_name,bit_rate", "-of", "json", str(path)]
+    try:
+        r = run(cmd, capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return None
+        streams = json.loads(r.stdout).get("streams") or []
+        if not streams or not streams[0].get("codec_name"):
+            return None
+        br = str(streams[0].get("bit_rate", ""))
+        return {"codec": streams[0]["codec_name"], "kbps": round(int(br) / 1000) if br.isdigit() else None}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def classify_album(results: list) -> tuple:
+    known = [r for r in results if r]
+    findings = []
+    if not known:
+        return "unknown", "unknown codec (ffprobe unavailable or failed)", ["codec unknown: ffprobe unavailable or failed"]
+    failed = len(results) - len(known)
+    if failed:
+        findings.append(f"ffprobe failed on {failed} file(s)")
+    codecs = Counter(r["codec"] for r in known)
+    if len(codecs) > 1:
+        findings.append("mixed codecs: " + ", ".join(sorted(codecs)))
+    dominant = codecs.most_common(1)[0][0]
+    if dominant == "aac":
+        kbps = [r["kbps"] for r in known if r["codec"] == "aac" and r["kbps"]]
+        if kbps:
+            n = int(round(statistics.median(kbps) / 32) * 32)
+            return f"aac {n}k", f"Lossy/ [AAC {n}k]", findings
+        return "aac", "Lossy/ [AAC]", findings
+    if dominant in ("alac", "flac"):
+        return dominant, "valid for Lossless/", findings
+    return dominant, f"unrecognized codec {dominant}", findings
+
+
+def probe_album(album, rules=None, run=subprocess.run) -> tuple:
+    rules = rules if rules is not None else load_rules()
+    try:
+        files = sorted(f for f in Path(album).iterdir() if f.is_file() and f.suffix.lower() in rules["audio_ext"])
+    except OSError:
+        return classify_album([])
+    return classify_album([detect_codec(f, run) for f in files])
