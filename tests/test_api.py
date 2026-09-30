@@ -92,7 +92,7 @@ def test_retry_original_uses_original_storefront(client):
 def test_settings_roundtrip_and_validation(client):
     assert client.get("/api/settings").json()["storefront"] == "jp"
     assert client.put("/api/settings", json={"error_threshold": 4}).json()["error_threshold"] == 4
-    bad = client.put("/api/settings", json={"track_delay": "1-2"})
+    bad = client.put("/api/settings", json={"track_delay": "0.5-2"})  # below the 1 s sanity floor
     assert bad.status_code == 422 and "track_delay" in bad.json()["detail"]
 
 

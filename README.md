@@ -55,7 +55,7 @@ Then open http://localhost:8110. Delete `data/` afterwards.
 ## Safety rules
 
 - Strictly sequential: one `gamdl-safe` process at a time.
-- The delay between albums is owned by the dashboard (settings `track_delay`, `album_delay`; floors 5 s and 30 s), passed to the wrapper through `GAMDL_TRACK_DELAY`, `GAMDL_ALBUM_DELAY`, `GAMDL_STOREFRONT`.
+- The delay between albums is owned by the dashboard (settings `track_delay`, `album_delay`; sanity floors 1 s and 5 s; the defaults 8-20 s and 60-180 s are the cautious choice, faster is at your own account's risk), passed to the wrapper through `GAMDL_TRACK_DELAY`, `GAMDL_ALBUM_DELAY`, `GAMDL_STOREFRONT`.
 - The queue auto-pauses after N consecutive 429/403 responses or N consecutive track errors (setting `error_threshold`, default 3; the track-error count works even when gamdl prints no 429 text). Resume is manual.
 - The daily track cap (`max_tracks_per_24h`) is checked before each item, so one large album can overshoot it. Low disk space and reaching the cap also pause the queue.
 - The default `--no-exceptions` extra argument is accepted by gamdl 3.9.1 (verified 2026-09-30).

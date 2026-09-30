@@ -1,8 +1,8 @@
 import re
 import math
 
-TRACK_FLOOR = 5.0
-ALBUM_FLOOR = 30.0
+TRACK_FLOOR = 1.0   # sanity guard only (never 0); the owner chooses the actual pace
+ALBUM_FLOOR = 5.0
 RETRY_FLOOR = 30.0
 
 DEFAULTS = {
