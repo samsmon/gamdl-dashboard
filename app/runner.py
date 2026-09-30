@@ -302,6 +302,7 @@ class Runner:
             elif isinstance(ev, TrackStart):
                 self.store.upsert_track(iid, ev.i, ev.title, "downloading")
                 self.store.update_item(iid, track_i=ev.i, track_n=ev.total, current_title=ev.title, status="downloading")
+                self._fill_names(iid)
                 self.live = {"track_pct": 0.0, "speed": None}
                 self._progress(iid)
             elif isinstance(ev, Progress):
@@ -389,7 +390,27 @@ class Runner:
         self._last_finish = now
         self._state()
 
+    def _fill_names(self, iid):
+        """Items are queued without a title (nothing is looked up when adding), so take album and artist from the
+        folder gamdl is writing to (<Artist>/<Album>). Only fills blanks, and only when exactly one album is in play."""
+        try:
+            cur = self.store.get_item(iid)
+            if not cur or (cur["title"] and cur["artist"]):
+                return
+            dirs = checker.find_output_dirs(self.cfg.staging_dir, cur["started_at"] or 0)
+            if len(dirs) != 1:
+                return
+            fields = {}
+            if not cur["title"]:
+                fields["title"] = dirs[0].name
+            if not cur["artist"]:
+                fields["artist"] = dirs[0].parent.name
+            self.store.update_item(iid, **fields)
+        except Exception:  # cosmetic only, never let it disturb a download
+            pass
+
     def _describe_output(self, item) -> dict:
+        self._fill_names(item["id"])
         cur = self.store.get_item(item["id"])
         dirs = checker.find_output_dirs(self.cfg.staging_dir, cur["started_at"] or 0)
         if not dirs:

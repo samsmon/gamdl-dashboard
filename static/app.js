@@ -226,7 +226,7 @@ function renderStatus() {
   const stopped = n(i => i.status === "cancelled");
   $("#statusbar").replaceChildren(
     h("div", { class: "g" }, h("span", {}, h("b", {}, engine())),
-      run ? h("span", { class: "dim" }, `${run.title || run.url} (${Math.round(albumPct(run))}%)`) : ""),
+      run ? h("span", { class: "dim" }, `${run.title || run.url} (${Math.round(albumPct(run))}%)${trackLine(run) ? " \u00b7 " + trackLine(run) : ""}`) : ""),
     h("div", { class: "g" }, h("span", {}, "Active: ", h("b", {}, n(i => RUNNING.includes(i.status)))), h("span", {}, "Queued: ", h("b", {}, n(i => i.status === "queued"))),
       h("span", {}, "Done: ", h("b", {}, n(i => i.status === "done"))), stopped ? h("span", {}, "Stopped: ", h("b", {}, stopped)) : "",
       h("span", {}, "Failed: ", h("b", {}, n(i => i.status === "error")))),
@@ -243,8 +243,16 @@ function renderQInfo() {
   const el = $("#qinfo"); if (!el || !S) return;
   el.replaceChildren(sel.size ? h("b", {}, `${sel.size} selected`) : "", sel.size ? " · " : "", "Showing ", h("b", {}, visible().length), ` / ${S.items.length}`);
 }
+function trackLine(it) {
+  if (!RUNNING.includes(it.status) || !it.current_title) return "";
+  return `track ${it.track_i || 0}/${it.track_n || "?"}: ${it.current_title}`;
+}
+function nowText(it) {
+  const d = delayInfo(it), t = trackLine(it) || (it.track_n ? `track ${it.track_i || 0}/${it.track_n}` : "starting");
+  return t + (d ? " \u2014 " + countdown(d.label, d.until) : "");
+}
 let rowSig = null;
-const sigOf = items => items.map(i => [i.id, i.status, i.track_i, i.track_n, i.error_msg, i.attempts, i.not_before, i.title, i.artist, i.size_bytes, i.library_note, i.codec, (i.findings || []).length].join("|")).join("\n") + "#" + S.settings.track_retries;
+const sigOf = items => items.map(i => [i.id, i.status, i.track_i, i.track_n, i.current_title, i.error_msg, i.attempts, i.not_before, i.title, i.artist, i.size_bytes, i.library_note, i.codec, (i.findings || []).length].join("|")).join("\n") + "#" + S.settings.track_retries;
 function renderRows() {
   const vis = visible(), frag = document.createDocumentFragment();
   rowSig = sigOf(S.items);
@@ -261,7 +269,8 @@ function renderRows() {
       } },
       h("td", { class: "c-n" }, n + 1),
       h("td", { class: "c-name", title: it.original_url || it.url }, h("div", {}, it.title || it.url),
-        it.artist ? h("div", { class: "sub" }, it.artist) : "", it.error_msg ? h("div", { class: "sub" }, it.error_msg) : ""),
+        it.artist ? h("div", { class: "sub" }, it.artist) : "", trackLine(it) ? h("div", { class: "sub" }, "\u25b6 " + trackLine(it)) : "",
+        it.error_msg ? h("div", { class: "sub" }, it.error_msg) : ""),
       h("td", { class: "c-status" }, h("span", { class: "chip st-" + it.status }, STATUS[it.status] || it.status)),
       h("td", { class: "c-prog" }, h("div", { class: "pcell" }, bar(pct, it.status === "waiting"), h("span", { class: "pct" }, Math.round(pct) + "%"))),
       h("td", { class: "c-tracks" }, it.track_n ? `${it.track_i || 0}/${it.track_n}` : "-"),
@@ -333,6 +342,7 @@ function generalPane(it) {
     kv("Artist", [it.artist || "-", it.artist ? h("button", { type: "button", class: "tb", style: "margin-left:8px", title: "watch this artist for new releases", onclick: () => followFromItem(it) }, ico("bell", 12), "follow") : ""]),
     kv("Link", h("a", { href: src, target: "_blank", rel: "noopener noreferrer" }, src)),
     kv("Status", [STATUS[it.status] || it.status, it.error_msg ? ` (${it.error_msg})` : ""]),
+    ...(RUNNING.includes(it.status) ? [kv("Now", nowText(it), "wide")] : []),
     kv("Tracks", it.track_n ? `${it.track_i || 0} / ${it.track_n}` : "-"),
     kv("Attempts", String(it.attempts || 0)),
     kv("Codec", it.codec ? `${it.codec}${it.classification ? ": " + it.classification : ""}` : "-"),

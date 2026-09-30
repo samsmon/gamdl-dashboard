@@ -437,3 +437,15 @@ async def test_fun_fact_says_new_for_unknown_album_and_stays_silent_without_libr
     await runner.step()
     it = store.get_item(b)
     assert it["status"] == "done" and it["library_note"] is None
+
+
+async def test_missing_title_and_artist_are_filled_from_the_output_folder(env):
+    runner, store, _, _ = env
+    a = add(store, 1)  # queued without a title, like every url added through the UI
+    await runner.step()
+    it = store.get_item(a)
+    assert it["title"] == "Album" and it["artist"] == "Artist ~"
+    b = add(store, 2, title="Keep me", artist="Me")
+    await runner.step()
+    it = store.get_item(b)
+    assert it["title"] == "Keep me" and it["artist"] == "Me"  # only blanks are filled
