@@ -1,6 +1,8 @@
 import asyncio
 import json
+import contextlib
 import time
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -8,7 +10,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import disk, forecast
 from app.bus import EventBus
@@ -22,12 +24,12 @@ from app.store import Store
 from app.urls import UrlError, normalize, parse_many
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
-PREVIEW_GETTER = None  # tests may replace this; None = real httpx getter
+PCACHE_MAX = 500
 NEEDS_FORCE = {"in_library_lossless", "similar", "in_staging"}
 
 
 class ParseIn(BaseModel):
-    text: str
+    text: str = Field(max_length=50000)
 
 
 class PreviewIn(BaseModel):
@@ -43,11 +45,11 @@ class QueueItemIn(BaseModel):
 
 
 class QueueIn(BaseModel):
-    items: list[QueueItemIn]
+    items: list[QueueItemIn] = Field(max_length=200)
 
 
 class ReorderIn(BaseModel):
-    ids: list[int]
+    ids: list[int] = Field(max_length=1000)
 
 
 def _public(item: dict, live=None) -> dict:
@@ -75,6 +77,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         runner.stop()
         if task:
             task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     app = FastAPI(lifespan=lifespan)
 
@@ -122,20 +126,23 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         svc = app.state.previews
         pv = await svc.fetch(p)
         s = store.get_settings()
-        lib = library.match(pv.remote(), s["library_exact"], s["library_similar"])
+        lib = await asyncio.to_thread(library.match, pv.remote(), s["library_exact"], s["library_similar"])
         source = "metadata"
         if lib.status == "unavailable" and pv.title:
             # metadata.csv unreadable: fall back to names from catalog.sqlite, which can never say "in library"
-            cm = catalog.match(pv.artist, pv.title)
+            cm = await asyncio.to_thread(catalog.match, pv.artist, pv.title)
             source = "catalog"
             hit = cm.level in ("exact", "likely")
             lib = LibraryMatch("similar" if hit else "new", 0.0, "", cm.paths[0] if hit else "",
                                cm.lossless if hit else None, ["metadata.csv unavailable: catalog names only"])
-        stg = staging_match(cfg.staging_dir, pv.artist, pv.title) if pv.title else None
+        stg = await asyncio.to_thread(staging_match, cfg.staging_dir, pv.artist, pv.title) if pv.title else None
         status = lib.status
         if status in ("new", "unknown", "unavailable") and stg and stg.level != "none":
             status = "in_staging"
         app.state.pcache[p.normalized] = status
+        app.state.pcache.move_to_end(p.normalized)
+        while len(app.state.pcache) > PCACHE_MAX:
+            app.state.pcache.popitem(last=False)
         return {
             "preview": asdict(pv),
             "library": {**asdict(lib), "status": status, "source": source, "metadata_mtime": library.mtime(),
@@ -146,15 +153,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         }
 
     app.state.previews = PreviewService(getter=None)
-    app.state.pcache = {}
-
-    @app.middleware("http")
-    async def _late_getter(request: Request, call_next):
-        # allows tests to swap PREVIEW_GETTER without rebuilding the app
-        import app.api as me
-        if me.PREVIEW_GETTER is not None:
-            app.state.previews._get = me.PREVIEW_GETTER
-        return await call_next(request)
+    app.state.pcache = OrderedDict()
 
     @app.post("/api/queue")
     def queue(body: QueueIn):
@@ -204,7 +203,10 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 raise HTTPException(409, "item is running")
             fields = {"status": "queued", "error_msg": None, "errors": 0, "attempts": 0, "not_before": None}
             if action == "retry_original":
-                fields["url"] = normalize(item["original_url"], None).normalized
+                try:
+                    fields["url"] = normalize(item["original_url"], None).normalized
+                except UrlError as e:
+                    raise HTTPException(422, str(e))
             store.update_item(item_id, **fields)
             runner.wake()
         elif action == "remove":

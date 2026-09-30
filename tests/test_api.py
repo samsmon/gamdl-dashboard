@@ -89,10 +89,8 @@ def test_pause_resume_flags(client):
 
 
 def test_preview_survives_missing_catalog_and_network(client, monkeypatch):
-    import app.api as api_mod
-
     async def boom(url): raise RuntimeError("offline")
-    monkeypatch.setattr(api_mod, "PREVIEW_GETTER", boom, raising=False)
+    client.app.state.previews._get = boom
     r = client.post("/api/preview", json={"url": "https://music.apple.com/jp/album/1"}).json()
     assert r["preview"]["source"] == "none"
     assert r["library"]["status"] in ("unknown", "unavailable", "new")
@@ -106,12 +104,10 @@ def album_page():
 
 
 def test_preview_flags_lossless_library_hit_and_queue_needs_force(client, monkeypatch):
-    import app.api as api_mod
-
     async def getter(url):
         return album_page()
 
-    monkeypatch.setattr(api_mod, "PREVIEW_GETTER", getter, raising=False)
+    client.app.state.previews._get = getter
     url = "https://music.apple.com/jp/album/42"
     r = client.post("/api/preview", json={"url": url}).json()
     assert r["library"]["status"] == "in_library_lossless" and r["library"]["confidence"] >= 0.85
@@ -129,12 +125,10 @@ def test_unpreviewed_url_can_be_queued_without_force(client):
 
 
 def test_new_album_is_default_checked(client, monkeypatch):
-    import app.api as api_mod
-
     async def getter(url):
         return album_page().replace("溜息", "Different Album").replace("心の奥", "Other Song")
 
-    monkeypatch.setattr(api_mod, "PREVIEW_GETTER", getter, raising=False)
+    client.app.state.previews._get = getter
     r = client.post("/api/preview", json={"url": "https://music.apple.com/jp/album/44"}).json()
     assert r["library"]["status"] == "new" and r["library"]["default_checked"] is True
 
@@ -150,3 +144,61 @@ def test_cookie_values_never_leak(client, tmp_path):
 def test_static_index_served(client):
     r = client.get("/")
     assert r.status_code == 200 and "gamdl" in r.text.lower()
+
+
+def test_crash_recovery_pauses_and_requeues(tmp_path):
+    from app.store import Store
+    cfg = Config(db_path=str(tmp_path / "r.sqlite"), gamdl_cmd=[sys.executable, FAKE], extra_args=[],
+                 staging_dir=str(tmp_path / "st"), disk_path=str(tmp_path), cookies_path=str(tmp_path / "c.txt"),
+                 catalog_path=str(tmp_path / "none.sqlite"), host="127.0.0.1", port=0, autostart=False,
+                 library_csv=str(tmp_path / "none.csv"))
+    st = Store(cfg.db_path)
+    i = st.add_item("https://music.apple.com/jp/album/5", "https://music.apple.com/jp/album/5", "album", "5")
+    st.update_item(i, status="downloading")
+    with TestClient(create_app(cfg)) as c:
+        s = c.get("/api/state").json()
+        assert s["paused"] is True and s["banner"]["kind"] == "recovered"
+        assert s["items"][0]["status"] == "queued"
+
+
+def test_retry_resets_counters(client):
+    from app.store import Store
+    i = q(client, "https://music.apple.com/jp/album/8")["results"][0]["id"]
+    st = Store(client.cfg.db_path)
+    st.update_item(i, status="error", attempts=2, not_before=time_future(), errors=3, error_msg="x")
+    assert client.post(f"/api/queue/{i}/retry").json() == {"ok": True}
+    it = client.get(f"/api/queue/{i}").json()
+    assert it["attempts"] == 0 and it["not_before"] is None and it["errors"] == 0 and it["status"] == "queued"
+
+
+def time_future():
+    import time
+    return time.time() + 999
+
+
+def test_retry_original_malformed_is_422(client):
+    from app.store import Store
+    i = q(client, "https://music.apple.com/jp/album/9")["results"][0]["id"]
+    Store(client.cfg.db_path).update_item(i, original_url="garbage")
+    r = client.post(f"/api/queue/{i}/retry_original")
+    assert r.status_code == 422 and r.json()["detail"]
+
+
+def test_oversize_items_rejected(client):
+    r = client.post("/api/queue", json={"items": [{"url": f"https://music.apple.com/jp/album/{n}"} for n in range(201)]})
+    assert r.status_code == 422
+
+
+def test_pcache_is_capped(client, monkeypatch):
+    import app.api as api_mod
+    monkeypatch.setattr(api_mod, "PCACHE_MAX", 3)
+
+    async def getter(url):
+        return album_page()
+
+    client.app.state.previews._get = getter
+    client.app.state.previews._delay = (0, 0)
+    for n in range(10, 16):
+        client.post("/api/preview", json={"url": f"https://music.apple.com/jp/album/{n}"})
+    keys = list(client.app.state.pcache)
+    assert len(keys) == 3 and keys[-1].endswith("/15")
