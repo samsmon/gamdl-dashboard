@@ -1,8 +1,0 @@
-pyproject.toml
-app/__init__.py
-gamdl_dashboard.egg-info/PKG-INFO
-gamdl_dashboard.egg-info/SOURCES.txt
-gamdl_dashboard.egg-info/dependency_links.txt
-gamdl_dashboard.egg-info/requires.txt
-gamdl_dashboard.egg-info/top_level.txt
-tests/test_config.py
