@@ -1,1 +1,46 @@
-<!doctype html><title>gamdl</title><body>gamdl</body>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gamdl queue</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header id="bar" aria-live="polite"></header>
+<div id="banner" role="status" aria-live="polite" hidden></div>
+<main>
+  <section id="add">
+    <label for="urls">urls (one per line, any storefront; downloaded from /jp/)</label>
+    <textarea id="urls" rows="3" spellcheck="false"></textarea>
+    <div class="row"><button id="btn-preview">preview</button><span id="add-msg"></span></div>
+    <table id="pv" hidden>
+      <thead><tr><th></th><th>title</th><th>artist</th><th>tracks</th><th>library check</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="row" id="pv-actions" hidden><button id="btn-queue">queue selected</button></div>
+  </section>
+  <section id="queue">
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th><span class="sr">expand</span></th><th>#</th><th>status</th><th>album</th><th>track</th><th>album</th><th>track</th><th>speed</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    </div>
+    <p id="empty" hidden>queue is empty.</p>
+  </section>
+  <nav id="tabs" role="tablist">
+    <button role="tab" data-tab="done" aria-selected="true">completed</button>
+    <button role="tab" data-tab="settings">settings</button>
+  </nav>
+  <section id="panel"></section>
+  <section id="logbox">
+    <div class="row"><strong>log</strong>
+      <select id="logfilter" aria-label="log filter"><option value="all">all</option><option value="warn">warn+</option><option value="error">error</option></select>
+      <button id="logcopy">copy</button></div>
+    <pre id="log" tabindex="0"></pre>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
