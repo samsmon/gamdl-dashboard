@@ -19,7 +19,10 @@ def cookie_status(path: str, now: float | None = None) -> dict:
                 elif line.startswith("#") or not line.strip():
                     continue
                 fields = line.split("\t")
-                if len(fields) < 7 or not fields[0].lstrip(".").endswith("apple.com"):
+                if len(fields) < 7:
+                    continue
+                d = fields[0].lstrip(".")
+                if d != "apple.com" and not d.endswith(".apple.com"):
                     continue
                 try:
                     exp = int(fields[4])

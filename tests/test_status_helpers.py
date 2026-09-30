@@ -1,5 +1,4 @@
 import os
-import time
 
 from app.cookies import cookie_status
 from app.disk import free_bytes
@@ -33,10 +32,33 @@ def test_earliest_expiry_only_apple_and_no_secrets(tmp_path):
     assert "SECRET" not in repr(s)
 
 
-def test_expired_and_httponly_and_session(tmp_path):
-    p = write_cookies(tmp_path, int(NOW) - 100, 0, extra=f"#HttpOnly_.apple.com\tTRUE\t/\tTRUE\t{int(NOW)+86400*30}\tx\ty")
+def test_httponly(tmp_path):
+    p = write_cookies(tmp_path, extra=f"#HttpOnly_.apple.com\tTRUE\t/\tTRUE\t{int(NOW)+86400*30}\tx\ty")
+    s = cookie_status(p, NOW)
+    assert s["expiry_days"] == 30 and not s["expired"]
+
+
+def test_session_cookie(tmp_path):
+    # Session cookie with expiry 0 should not set earliest; future expiry should be used
+    p = write_cookies(tmp_path, int(NOW) + 86400 * 5, 0)
+    s = cookie_status(p, NOW)
+    assert s["expiry_days"] == 5 and not s["expired"]
+
+
+def test_expired(tmp_path):
+    p = write_cookies(tmp_path, int(NOW) - 100)
     s = cookie_status(p, NOW)
     assert s["expired"] is True and s["expiry_days"] < 0
+
+
+def test_evilapple_com_ignored(tmp_path):
+    lines = ["# Netscape HTTP Cookie File"]
+    lines.append(f".evilapple.com\tTRUE\t/\tTRUE\t{int(NOW) + 86400}\tname\tvalue")
+    lines.append(f".apple.com\tTRUE\t/\tTRUE\t{int(NOW) + 86400 * 10}\treal\tvalue")
+    p = tmp_path / "cookies.txt"
+    p.write_text("\n".join(lines), encoding="utf-8")
+    s = cookie_status(str(p), NOW)
+    assert s["expiry_days"] == 10
 
 
 def test_disk_free_and_bad_path(tmp_path):
