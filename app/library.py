@@ -12,6 +12,7 @@ _TAGS = re.compile(r"\[[^\]]*\]")
 _SUFFIX = re.compile(r"\s*-\s*(single|ep)\s*$", re.I)
 W_TITLE, W_DURATION, W_OVERLAP, W_COUNT, ARTIST_BONUS = 0.35, 0.25, 0.25, 0.15, 0.05
 THIN_EVIDENCE_CAP = 0.80
+TITLE_ONLY_MIN = 0.90  # with only a title to go on (Apple page gave no tracks), below this and no artist match it is discounted
 
 
 def norm_title(s: str) -> str:
@@ -117,7 +118,10 @@ class Library:
         if not comps:
             return 0.0
         score = sum(w * v for w, v in comps) / sum(w for w, _ in comps)
-        if r.artist and (artist_variants(r.artist) & rec.artists):
+        artist_hit = bool(r.artist and (artist_variants(r.artist) & rec.artists))
+        if len(comps) == 1 and not artist_hit and score < TITLE_ONLY_MIN:
+            score *= 0.5  # a bare fuzzy title ("diamonds" ~ "star diamond") is not evidence of the same album
+        if artist_hit:
             score = min(1.0, score + ARTIST_BONUS)
         if len(comps) < 3:
             score = min(score, THIN_EVIDENCE_CAP)

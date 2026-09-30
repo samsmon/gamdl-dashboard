@@ -67,6 +67,20 @@ def test_title_only_evidence_can_never_be_in_library(tmp_path):
     assert m.status == "similar" and m.confidence <= 0.80
 
 
+def test_bare_fuzzy_title_is_not_similar(tmp_path):
+    # real false positives: the Apple page gave only a title, and a fuzzy title alone is not evidence
+    L = lib(tmp_path,
+            album_rows("star diamond", "Starlight Kukugumi", ["a"], [100.0], "audio/mpeg", "Lossy\\S\\star diamond"),
+            album_rows("you i", "Stella MiNE", ["a"], [100.0], "audio/flac", "Lossless\\T\\you i"))
+    assert L.match(RemoteAlbum(title="DIAMONDS - Single", artist="真新宿GR学園")).status == "new"
+    assert L.match(RemoteAlbum(title="YA DIG? - Single", artist="Bellemule")).status == "new"
+
+
+def test_fuzzy_title_with_matching_artist_stays_similar(tmp_path):
+    L = lib(tmp_path, album_rows("star diamond", "Starlight Kukugumi", ["a"], [100.0], "audio/mpeg", "Lossy\\S\\star diamond"))
+    assert L.match(RemoteAlbum(title="DIAMONDS - Single", artist="Starlight Kukugumi")).status == "similar"
+
+
 def test_different_album_is_new(tmp_path):
     L = lib(tmp_path, album_rows("Other", "x", ["a", "b"], [100.0, 90.0], "audio/flac", "Lossless\\A\\Other"))
     assert L.match(remote()).status == "new"
