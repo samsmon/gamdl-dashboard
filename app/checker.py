@@ -15,10 +15,16 @@ def find_output_dirs(staging: str, since: float) -> list:
         for artist in sorted(os.scandir(staging), key=lambda e: e.name):
             if artist.name.startswith(".") or not artist.is_dir():
                 continue
-            for album in sorted(os.scandir(artist.path), key=lambda e: e.name):
-                if album.is_dir() and album.stat().st_mtime >= since - 2:
-                    out.append(Path(album.path))
+            try:
+                with os.scandir(artist.path) as albums:
+                    for album in sorted(albums, key=lambda e: e.name):
+                        if album.is_dir() and album.stat().st_mtime >= since - 2:
+                            out.append(Path(album.path))
+            except OSError:
+                # Skip this artist if we can't read it, but continue with others
+                continue
     except OSError:
+        # Staging directory doesn't exist
         return []
     return out
 
@@ -26,23 +32,38 @@ def find_output_dirs(staging: str, since: float) -> list:
 def dir_size(paths: list) -> int:
     total = 0
     for p in paths:
-        for f in Path(p).rglob("*"):
-            if f.is_file():
-                total += f.stat().st_size
+        try:
+            for f in Path(p).rglob("*"):
+                if f.is_file():
+                    try:
+                        total += f.stat().st_size
+                    except OSError:
+                        # Skip files that cannot be stat'ed (removed mid-scan, broken symlink)
+                        continue
+        except OSError:
+            # Skip paths that don't exist or cannot be read
+            continue
     return total
 
 
 def check_album(album: Path, expected_tracks, rules: dict | None = None) -> list:
-    rules = rules or load_rules()
+    rules = rules if rules is not None else load_rules()
     findings = []
-    files = [f for f in Path(album).iterdir() if f.is_file()]
+    try:
+        files = [f for f in Path(album).iterdir() if f.is_file()]
+    except OSError as e:
+        return [f"cannot read folder: {e.strerror}"]
     names = {f.name.lower() for f in files}
     audio = [f for f in files if f.suffix.lower() in rules["audio_ext"]]
     if not audio:
         findings.append("no audio files")
     for f in files:
-        if f.stat().st_size == 0:
-            findings.append(f"zero-byte file: {f.name}")
+        try:
+            if f.stat().st_size == 0:
+                findings.append(f"zero-byte file: {f.name}")
+        except OSError:
+            # Skip files that vanish mid-run
+            continue
     if rules["cover_name"].lower() not in names:
         findings.append(f"missing {rules['cover_name']}")
     if rules.get("require_lrc"):

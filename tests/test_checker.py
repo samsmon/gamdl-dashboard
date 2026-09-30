@@ -42,11 +42,11 @@ def test_artist_naming_rules(tmp_path):
 
 
 def test_forbidden_chars(tmp_path):
-    # Test with Windows-legal character (# is forbidden in rules but legal in filenames on Windows/Linux)
+    # Test with Windows-legal character for cross-platform compatibility
     d = album(tmp_path, files=("01 A#.m4a", "01 A#.lrc", "Cover.jpg"))
     rules = {**load_rules(), "forbidden_chars": "#"}
     assert any("forbidden character" in x for x in check_album(d, 1, rules))
-    # Platform-independent: default rules don't flag clean album (coverage by test_clean_album)
+    # Default rules contain only OS-level forbidden chars; clean album passes
     clean = album(tmp_path, artist="Clean ~", name="Album2")
     assert not any("forbidden character" in x for x in check_album(clean, 1))
 
@@ -70,3 +70,30 @@ def test_dir_size(tmp_path):
 def test_rules_file_loads():
     r = load_rules()
     assert r["cover_name"] == "Cover.jpg" and ".m4a" in r["audio_ext"]
+
+
+def test_check_album_nonexistent_dir(tmp_path):
+    # check_album must not raise on missing directory, returns a finding instead
+    nonexistent = tmp_path / "Missing ~" / "Album"
+    findings = check_album(nonexistent, 1)
+    assert len(findings) > 0
+    assert any("cannot read folder" in x for x in findings)
+
+
+def test_dir_size_nonexistent_path(tmp_path):
+    # dir_size must ignore paths that don't exist
+    nonexistent = tmp_path / "missing_folder"
+    assert dir_size([nonexistent]) == 0
+
+
+def test_find_output_dirs_skips_plain_file_artist(tmp_path):
+    # find_output_dirs must skip artist-level plain files but keep other albums
+    good_album = album(tmp_path, artist="Good ~", name="Album1")
+    # Create a plain file at artist level (not a directory)
+    (tmp_path / "BadFile ~").write_bytes(b"x")
+    # Create another good artist with album
+    good_album2 = album(tmp_path, artist="Good2 ~", name="Album2")
+    found = find_output_dirs(str(tmp_path), since=time.time() - 60)
+    assert len(found) == 2
+    assert good_album in found
+    assert good_album2 in found
