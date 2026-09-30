@@ -33,6 +33,8 @@ def artist_variants(s: str) -> set:
 
 def _rank(entries, artist, album):
     a, av = norm(album), artist_variants(artist)
+    if not a:
+        return [], []
     exact, likely = [], []
     for alb, ents in entries:
         if alb == a:
@@ -83,6 +85,8 @@ class Catalog:
             db.close()
         dirs: dict = {}
         for rp, lossless in rows:
+            if not isinstance(rp, str):
+                continue
             parts = rp.split("/")
             if len(parts) < 5:
                 continue

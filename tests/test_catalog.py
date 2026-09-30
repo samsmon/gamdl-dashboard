@@ -81,3 +81,19 @@ def test_staging_match(tmp_path):
     assert staging_match(str(tmp_path), "緑黄色社会", "Party!!").level == "exact"
     assert staging_match(str(tmp_path), "x", "Nope").level == "none"
     assert staging_match(str(tmp_path / "gone"), "x", "y").level == "none"
+
+
+def test_malformed_rows_do_not_raise(tmp_path):
+    p = str(tmp_path / "c.sqlite"); make_catalog(p, ROWS)
+    db = sqlite3.connect(p)
+    db.execute("INSERT INTO tracks(relative_path,is_lossless) VALUES(NULL,1)")
+    db.execute("INSERT INTO tracks(relative_path,is_lossless) VALUES(42,1)")
+    db.execute("INSERT INTO tracks(relative_path,is_lossless) VALUES(?,1)", (b"blob/bytes",))
+    db.commit(); db.close()
+    m = Catalog(p).match("Someone", "Old Album")
+    assert m.level == "exact"
+
+
+def test_empty_normalized_album_matches_nothing(tmp_path):
+    p = str(tmp_path / "c.sqlite"); make_catalog(p, ROWS + [("Lossless/J-Pop/X ~/!!!/01 a.flac", 1)])
+    assert Catalog(p).match("X", "!!!").level == "none"
