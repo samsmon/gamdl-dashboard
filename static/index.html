@@ -8,16 +8,17 @@
 </head>
 <body>
 <header id="bar" aria-live="polite"></header>
+<div id="status-msg" role="status" aria-live="polite" hidden></div>
 <div id="banner" role="status" aria-live="polite" hidden></div>
 <main>
   <section id="add">
     <label for="urls">urls (one per line, any storefront; downloaded from /jp/)</label>
     <textarea id="urls" rows="3" spellcheck="false"></textarea>
     <div class="row"><button id="btn-preview">preview</button><span id="add-msg"></span></div>
-    <table id="pv" hidden>
+    <div class="tablewrap"><table id="pv" hidden>
       <thead><tr><th></th><th>title</th><th>artist</th><th>tracks</th><th>library check</th><th></th></tr></thead>
       <tbody></tbody>
-    </table>
+    </table></div>
     <div class="row" id="pv-actions" hidden><button id="btn-queue">queue selected</button></div>
   </section>
   <section id="queue">
