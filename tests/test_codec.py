@@ -72,3 +72,46 @@ def test_probe_album_nonexistent_dir(tmp_path):
     label, cls, findings = probe_album(nonexistent, run=fake_run({}))
     assert label == "unknown"
     assert len(findings) > 0
+
+
+def test_detect_invalid_json_shapes():
+    # Top-level non-dict outputs
+    assert detect_codec("x", fake_run([])) is None
+    assert detect_codec("x", fake_run(None)) is None
+    assert detect_codec("x", fake_run("x")) is None
+
+
+def test_detect_invalid_streams():
+    # streams field not a list
+    assert detect_codec("x", fake_run({"streams": "x"})) is None
+    # streams list contains non-dict
+    assert detect_codec("x", fake_run({"streams": [1]})) is None
+
+
+def test_detect_nondigit_bitrate():
+    # Non-numeric bit_rate like "N/A" should give None for kbps
+    r = detect_codec("x.m4a", fake_run({"streams": [{"codec_name": "aac", "bit_rate": "N/A"}]}))
+    assert r == {"codec": "aac", "kbps": None}
+
+
+def test_classify_aac_unknown_bitrate():
+    # AAC files without bitrate info
+    label, cls, _ = classify_album([{"codec": "aac", "kbps": None}])
+    assert label == "aac" and cls == "Lossy/ [AAC]"
+
+
+def test_classify_flac_lossless():
+    # FLAC should be classified as lossless
+    label, cls, _ = classify_album([{"codec": "flac", "kbps": None}])
+    assert label == "flac" and cls == "valid for Lossless/"
+
+
+def test_probe_album_missing_audio_ext_in_rules(tmp_path):
+    d = tmp_path / "A" / "B"
+    d.mkdir(parents=True)
+    (d / "01 x.m4a").write_bytes(b"x")
+    # Rules dict missing audio_ext key should not raise
+    incomplete_rules = {}
+    label, cls, findings = probe_album(d, rules=incomplete_rules, run=fake_run({}))
+    assert label == "unknown"
+    assert len(findings) > 0

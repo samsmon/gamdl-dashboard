@@ -96,12 +96,17 @@ def detect_codec(path, run=subprocess.run):
         r = run(cmd, capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
             return None
-        streams = json.loads(r.stdout).get("streams") or []
-        if not streams or not streams[0].get("codec_name"):
+        data = json.loads(r.stdout)
+        if not isinstance(data, dict):
+            return None
+        streams = data.get("streams") or []
+        if not isinstance(streams, list) or not streams or not isinstance(streams[0], dict):
+            return None
+        if not streams[0].get("codec_name"):
             return None
         br = str(streams[0].get("bit_rate", ""))
         return {"codec": streams[0]["codec_name"], "kbps": round(int(br) / 1000) if br.isdigit() else None}
-    except (OSError, subprocess.SubprocessError, ValueError):
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError, TypeError):
         return None
 
 
@@ -120,7 +125,7 @@ def classify_album(results: list) -> tuple:
     if dominant == "aac":
         kbps = [r["kbps"] for r in known if r["codec"] == "aac" and r["kbps"]]
         if kbps:
-            n = int(round(statistics.median(kbps) / 32) * 32)
+            n = round(statistics.median(kbps) / 32) * 32
             return f"aac {n}k", f"Lossy/ [AAC {n}k]", findings
         return "aac", "Lossy/ [AAC]", findings
     if dominant in ("alac", "flac"):
@@ -129,9 +134,9 @@ def classify_album(results: list) -> tuple:
 
 
 def probe_album(album, rules=None, run=subprocess.run) -> tuple:
-    rules = rules if rules is not None else load_rules()
     try:
+        rules = rules if rules is not None else load_rules()
         files = sorted(f for f in Path(album).iterdir() if f.is_file() and f.suffix.lower() in rules["audio_ext"])
-    except OSError:
+    except (OSError, ValueError, KeyError):
         return classify_album([])
     return classify_album([detect_codec(f, run) for f in files])
