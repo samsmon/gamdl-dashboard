@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from app import checker, disk, forecast
 from app.guard import Guard
+from app.library import Library, library_note, remote_from_dir
 from app.parser import (AlbumDelay, Finished, Line, LineSplitter, Progress, TrackDelay, TrackError,
                         TrackSkip, TrackStart, UrlStart, parse_line)
 from app.settings import parse_range
@@ -35,6 +36,7 @@ def _group_kwargs() -> dict:
 class Runner:
     def __init__(self, store, bus, cfg, sleep=asyncio.sleep, clock=time.time, rand=random.uniform):
         self.store, self.bus, self.cfg = store, bus, cfg
+        self.library = Library(cfg.library_csv)
         self._sleep, self._clock, self._rand = sleep, clock, rand
         self.proc = None
         self.current_id = None
@@ -401,5 +403,24 @@ class Runner:
             codec, classification, codec_findings = checker.probe_album(d, rules)
             findings.extend(f"{d.name}: {f}" for f in codec_findings)
         path = str(dirs[0]) if len(dirs) == 1 else str(dirs[0].parent)
+        lib_status, lib_note = self._library_fun_fact(dirs, rules)
         return {"output_path": path, "size_bytes": checker.dir_size(dirs), "findings": json.dumps(findings),
-                "codec": codec, "classification": classification}
+                "codec": codec, "classification": classification, "library_status": lib_status, "library_note": lib_note}
+
+    def _library_fun_fact(self, dirs, rules) -> tuple:
+        """After a download, match the real files (title, track names, count, durations) against the library.
+        Informational only: it never blocks or changes the download."""
+        rank = {"in_library_lossless": 3, "in_library_lossy": 2, "similar": 1, "new": 0}
+        s = self.store.get_settings()
+        notes, best = [], None
+        for d in dirs:
+            try:
+                m = self.library.match(remote_from_dir(d, rules["audio_ext"]), s["library_exact"], s["library_similar"])
+            except Exception:  # a broken library must never fail a finished download
+                continue
+            note = library_note(m)
+            if note:
+                notes.append(f"{d.name}: {note}" if len(dirs) > 1 else note)
+            if m.status in rank and (best is None or rank[m.status] > rank[best]):
+                best = m.status
+        return best, ("; ".join(notes) or None)

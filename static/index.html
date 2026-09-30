@@ -3,45 +3,39 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>gamdl queue</title>
+<title>gamdl dashboard</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<header id="bar" aria-live="polite"></header>
-<div id="status-msg" role="status" aria-live="polite" hidden></div>
-<div id="banner" role="status" aria-live="polite" hidden></div>
-<main>
-  <section id="add">
-    <label for="urls">urls (one per line, any storefront; downloaded from /jp/)</label>
-    <textarea id="urls" rows="3" spellcheck="false"></textarea>
-    <div class="row"><button id="btn-preview">preview</button><span id="add-msg"></span></div>
-    <div class="tablewrap"><table id="pv" hidden>
-      <thead><tr><th></th><th>title</th><th>artist</th><th>tracks</th><th>library check</th><th></th></tr></thead>
-      <tbody></tbody>
-    </table></div>
-    <div class="row" id="pv-actions" hidden><button id="btn-queue">queue selected</button></div>
-  </section>
-  <section id="queue">
-    <div class="tablewrap">
-    <table>
-      <thead><tr><th><span class="sr">expand</span></th><th>#</th><th>status</th><th>album</th><th>track</th><th>album</th><th>track</th><th>speed</th><th></th></tr></thead>
-      <tbody id="rows"></tbody>
-    </table>
+<div class="app">
+  <header class="toolbar" id="toolbar"></header>
+  <div id="banner" role="status" aria-live="polite" hidden></div>
+  <div class="workspace">
+    <aside class="sidebar" id="sidebar" aria-label="filters"></aside>
+    <div class="pane">
+      <div class="qhead" id="qhead"></div>
+      <div class="tablewrap" id="tablewrap">
+        <table id="grid">
+          <thead><tr>
+            <th class="c-n">#</th><th class="c-name">Name</th><th class="c-status">Status</th><th class="c-prog">Progress</th>
+            <th class="c-tracks">Tracks</th><th class="c-speed">Speed</th><th class="c-delay">Delay</th><th class="c-size">Size</th>
+          </tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <p id="empty" class="empty" hidden></p>
+      </div>
+      <div class="resizer" id="resizer" role="separator" aria-orientation="horizontal" title="drag to resize"></div>
+      <section class="detail" id="detail" aria-label="details">
+        <div class="dtabs" id="dtabs"></div>
+        <div class="dbody" id="dbody" tabindex="0"></div>
+      </section>
     </div>
-    <p id="empty" hidden>queue is empty.</p>
-  </section>
-  <nav id="tabs" role="tablist">
-    <button role="tab" data-tab="done" aria-selected="true">completed</button>
-    <button role="tab" data-tab="settings">settings</button>
-  </nav>
-  <section id="panel"></section>
-  <section id="logbox">
-    <div class="row"><strong>log</strong>
-      <select id="logfilter" aria-label="log filter"><option value="all">all</option><option value="warn">warn+</option><option value="error">error</option></select>
-      <button id="logcopy">copy</button></div>
-    <pre id="log" tabindex="0"></pre>
-  </section>
-</main>
+  </div>
+  <footer class="statusbar" id="statusbar"></footer>
+</div>
+<div id="ctx" class="ctx" role="menu" hidden></div>
+<div id="modal-root"></div>
+<div id="status-msg" role="status" aria-live="polite" hidden></div>
 <script src="app.js"></script>
 </body>
 </html>

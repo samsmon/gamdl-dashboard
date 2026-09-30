@@ -397,3 +397,43 @@ async def test_verdict_halts_even_when_user_cancelled(env):
     await runner._finish(store.get_item(a), _Run(verdict=Verdict("rate_limited", "storm")), 0)
     assert store.get_item(a)["status"] == "cancelled"
     assert store.get_banner()["kind"] == "rate_limited" and store.get_flag("paused") == "1"
+
+
+def _library_csv(path, album, titles, codec="audio/flac"):
+    import csv
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["Title", "Artist", "Album", "Album Artist", "Track Number", "Total Tracks", "Codec", "Duration", "Path"])
+        for i, t in enumerate(titles, 1):
+            w.writerow([t, "Artist", album, "Artist", i, len(titles), codec, 100.0, f"E:/Music/L/{album}/{i:02d} {t}.x"])
+
+
+async def test_finished_download_gets_library_fun_fact(env, tmp_path):
+    from app.library import Library
+    runner, store, _, _ = env
+    csv_path = tmp_path / "metadata.csv"
+    _library_csv(csv_path, "Album", ["Song 1", "Song 2", "Song 3"])
+    runner.library = Library(str(csv_path))
+    a = add(store, 1, expected_tracks=3)
+    await runner.step()
+    it = store.get_item(a)
+    assert it["status"] == "done"
+    assert it["library_status"] == "in_library_lossless"
+    assert "already in your library, lossless" in it["library_note"]
+
+
+async def test_fun_fact_says_new_for_unknown_album_and_stays_silent_without_library(env, tmp_path):
+    from app.library import Library
+    runner, store, _, _ = env
+    csv_path = tmp_path / "metadata.csv"
+    _library_csv(csv_path, "Something Else", ["x", "y"])
+    runner.library = Library(str(csv_path))
+    a = add(store, 1)
+    await runner.step()
+    it = store.get_item(a)
+    assert it["library_status"] == "new" and "not in your library" in it["library_note"]
+    runner.library = Library(str(tmp_path / "missing.csv"))  # unreadable library: no note, download still succeeds
+    b = add(store, 2)
+    await runner.step()
+    it = store.get_item(b)
+    assert it["status"] == "done" and it["library_note"] is None

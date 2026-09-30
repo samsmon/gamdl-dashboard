@@ -63,13 +63,16 @@ Then open http://localhost:8110. Delete `data/` afterwards.
 - Retries never happen after a 429/403 (or other guard verdict).
 - The cookies file is never read by the dashboard; only its existence, mtime and age are reported.
 
-## Library pre-check
+## Library note (after download)
 
-Before queueing, each album is compared against the library CSV (`GAMDL_DASH_LIBRARY_CSV`); the
-staging check runs only when that metadata status is `new`, `unknown` or `unavailable`. Statuses: `in_library_lossless`, `in_library_lossy`, `similar`, `new`,
-`unknown` (no album data from the Apple page), `unavailable` (CSV could not be read), and
-`in_staging`. `in_library_lossless`, `similar` and `in_staging` require `force` to queue.
+URLs are queued immediately, with no lookup at add time (pasting a few hundred URLs is instant). When an album
+finishes, the real files (folder names, track names, track count, ffprobe durations) are compared against the
+library CSV (`GAMDL_DASH_LIBRARY_CSV`) and the result is shown as a "Fun fact" line in the item's General tab
+(for example "already in your library, lossless (97%): ..." or "not in your library, as far as metadata.csv knows").
+It is informational only: it never blocks, skips or changes a download, and it is silent when the CSV cannot be read.
 Score thresholds are the settings `library_exact` (0.85) and `library_similar` (0.55).
+Because the check runs on the downloaded files it has full evidence (unlike the Apple page, which only gives a title).
+The old `/api/preview` endpoint still exists but the UI no longer calls it.
 
 ## Network warning
 

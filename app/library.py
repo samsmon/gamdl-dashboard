@@ -2,8 +2,10 @@ import csv
 import difflib
 import os
 import re
+import subprocess
 import unicodedata
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from app.catalog import artist_variants
 
@@ -21,6 +23,42 @@ def norm_title(s: str) -> str:
     s = _SUFFIX.sub("", s)
     s = re.sub(r"[^\w]+", " ", s)
     return " ".join(s.split())
+
+
+_TRACKNO = re.compile(r"^\s*\d{1,3}(?:[-.]\d{1,3})?[\s.\-_)]+")
+
+
+def _duration(path, run=subprocess.run):
+    try:
+        r = run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+                capture_output=True, text=True, timeout=30)
+        return float(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def remote_from_dir(album, audio_ext, run=subprocess.run) -> "RemoteAlbum":
+    """Describe a downloaded album (staging layout <Artist>/<Album>/NN Title.ext) so it can be matched with full evidence."""
+    album = Path(album)
+    files = sorted(f for f in album.iterdir() if f.is_file() and f.suffix.lower() in audio_ext)
+    return RemoteAlbum(title=album.name, artist=album.parent.name, tracks=len(files),
+                       track_titles=[_TRACKNO.sub("", f.stem) for f in files],
+                       durations=[_duration(f, run) for f in files])
+
+
+def library_note(m: "LibraryMatch") -> str:
+    """One-line 'fun fact' for a finished download; empty when the library could not be checked."""
+    pct = f" ({round(m.confidence * 100)}%)" if m.confidence else ""
+    where = f"{m.album} - {m.path}" if m.path else m.album
+    if m.status == "in_library_lossless":
+        return f"already in your library, lossless{pct}: {where}"
+    if m.status == "in_library_lossy":
+        return f"you already had a lossy copy{pct}: {where}"
+    if m.status == "similar":
+        return f"looks similar to something in your library{pct}: {where}"
+    if m.status == "new":
+        return "not in your library, as far as metadata.csv knows"
+    return ""
 
 
 def is_lossless_codec(codec: str) -> bool:
