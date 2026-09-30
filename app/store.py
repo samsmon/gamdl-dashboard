@@ -27,6 +27,12 @@ CREATE TABLE IF NOT EXISTS tracks(
 CREATE TABLE IF NOT EXISTS log(id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER, ts REAL, level TEXT, text TEXT);
 CREATE TABLE IF NOT EXISTS finished_tracks(ts REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS follows(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, artist_id TEXT NOT NULL UNIQUE, name TEXT, storefront TEXT NOT NULL DEFAULT 'jp',
+  label_filter TEXT, added_at REAL, last_checked REAL, last_error TEXT, baseline_done INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS releases(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, follow_id INTEGER NOT NULL, collection_id TEXT NOT NULL UNIQUE, title TEXT, kind TEXT,
+  release_date TEXT, track_count INTEGER, copyright TEXT, url TEXT, status TEXT NOT NULL DEFAULT 'new', first_seen REAL);
 """
 
 
@@ -180,3 +186,55 @@ class Store:
 
     def done_items(self):
         return self._all("SELECT * FROM items WHERE status='done' ORDER BY finished_at DESC, id DESC")
+
+    # follows / releases
+    _FOLLOW_COLS = {"name", "label_filter", "last_checked", "last_error", "baseline_done"}
+
+    def add_follow(self, artist_id, name, storefront, label_filter=None):
+        row = self._one("SELECT id FROM follows WHERE artist_id=?", (artist_id,))
+        if row:
+            return row["id"], False
+        cur = self._exec("INSERT INTO follows(artist_id,name,storefront,label_filter,added_at) VALUES(?,?,?,?,?)",
+                         (artist_id, name, storefront, label_filter, time.time()))
+        return cur.lastrowid, True
+
+    def get_follow(self, follow_id):
+        return self._one("SELECT * FROM follows WHERE id=?", (follow_id,))
+
+    def list_follows(self):
+        return self._all("SELECT * FROM follows ORDER BY name COLLATE NOCASE, id")
+
+    def update_follow(self, follow_id, **fields):
+        bad = set(fields) - self._FOLLOW_COLS
+        if bad:
+            raise ValueError(f"unknown follow columns: {sorted(bad)}")
+        if fields:
+            self._exec(f"UPDATE follows SET {','.join(f'{k}=?' for k in fields)} WHERE id=?", (*fields.values(), follow_id))
+
+    def remove_follow(self, follow_id):
+        self._exec("DELETE FROM releases WHERE follow_id=?", (follow_id,))
+        self._exec("DELETE FROM follows WHERE id=?", (follow_id,))
+
+    def add_release(self, follow_id, r, status):
+        cur = self._exec(
+            "INSERT OR IGNORE INTO releases(follow_id,collection_id,title,kind,release_date,track_count,copyright,url,status,first_seen)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (follow_id, r["collection_id"], r["title"], r["kind"], r["release_date"], r["track_count"], r["copyright"], r["url"], status, time.time()))
+        return cur.rowcount == 1
+
+    def list_releases(self, status=None, limit=500):
+        where, args = ("WHERE r.status=?", [status]) if status else ("", [])
+        return self._all("SELECT r.*, f.name AS artist FROM releases r JOIN follows f ON f.id=r.follow_id " + where +
+                         " ORDER BY r.release_date DESC, r.id DESC LIMIT ?", (*args, limit))
+
+    def get_release(self, release_id):
+        return self._one("SELECT r.*, f.name AS artist FROM releases r JOIN follows f ON f.id=r.follow_id WHERE r.id=?", (release_id,))
+
+    def set_release_status(self, release_id, status):
+        self._exec("UPDATE releases SET status=? WHERE id=?", (status, release_id))
+
+    def count_releases(self, status):
+        return self._one("SELECT COUNT(*) AS n FROM releases WHERE status=?", (status,))["n"]
+
+    def new_counts(self):
+        return {r["follow_id"]: r["n"] for r in self._all("SELECT follow_id, COUNT(*) AS n FROM releases WHERE status='new' GROUP BY follow_id")}

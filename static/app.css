@@ -137,3 +137,17 @@ pre.log .lvl-WARNING, pre.log .lvl-ERROR, pre.log .lvl-CRITICAL { font-weight: b
 
 @media (max-width: 820px) { .sidebar { display: none; } .c-speed, .c-size, .c-tracks, .c-delay { display: none; } .tb span.t { display: none; } }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* releases view */
+.relpane { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: auto; }
+.relhead { display: flex; gap: 6px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+.relhead input { flex: 1; min-width: 200px; } .relhead #follow-label { flex: 0 1 240px; }
+.relbody { padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.relbody .side-h { padding: 8px 0 0; }
+.relbody .tablewrap { flex: none; min-height: 0; overflow: visible; }
+.relbody table td.c-name { max-width: 420px; }
+.relbody .c-chk { width: 34px; } .relbody td.acts { text-align: right; white-space: nowrap; }
+.relbody th { position: static; }
+.tb.on { border-color: var(--fg); font-weight: bold; }
+.relbody .rowbar { margin: 0 0 4px; flex-wrap: wrap; }
+.relbody .grow { flex: 1; }

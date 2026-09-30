@@ -18,6 +18,7 @@ from app.bus import EventBus
 from app.catalog import Catalog, staging_match
 from app.config import Config, from_env
 from app.cookies import cookie_status
+from app.releases import ReleaseError, Watcher
 from app.library import Library, LibraryMatch
 from app.preview import PreviewService
 from app.runner import Runner
@@ -53,6 +54,20 @@ class ReorderIn(BaseModel):
     ids: list[int] = Field(max_length=1000)
 
 
+class FollowIn(BaseModel):
+    input: str = Field(max_length=500)
+    label_filter: str | None = Field(default=None, max_length=100)
+
+
+class FollowPatch(BaseModel):
+    label_filter: str | None = Field(default=None, max_length=100)
+
+
+class BulkIn(BaseModel):
+    ids: list[int] = Field(max_length=500)
+    action: str
+
+
 def _public(item: dict, live=None) -> dict:
     out = dict(item)
     out["findings"] = json.loads(item["findings"]) if item.get("findings") else []
@@ -67,6 +82,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     runner = Runner(store, bus, cfg)
     catalog = Catalog(cfg.catalog_path)
     library = Library(cfg.library_csv)
+    watcher = Watcher(store, bus)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -76,13 +92,18 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if not cfg.autostart:
             store.set_flag("paused", "1")  # the runner loop always runs; autostart=0 only starts it paused
         task = asyncio.create_task(runner.run_forever())
+        wtask = asyncio.create_task(watcher.run_forever()) if cfg.watch else None
         yield
         runner.stop()
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        watcher.stop()
+        for t in (task, wtask):
+            if t:
+                t.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await t
 
     app = FastAPI(lifespan=lifespan)
+    app.state.watcher = watcher
 
     @app.middleware("http")
     async def refuse_cross_origin_writes(request: Request, call_next):
@@ -105,6 +126,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "cookies": cookie_status(cfg.cookies_path),
             "cap": {"used": store.count_tracks_since(now - 86400), "limit": s["max_tracks_per_24h"]},
             "forecast_bytes": forecast.queue_bytes(store), "errors": sum(i["errors"] for i in items),
+            "releases": {"new": store.count_releases("new"), "follows": len(store.list_follows())},
         }
 
     def need(item_id: int) -> dict:
@@ -258,6 +280,82 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             return JSONResponse({"detail": str(e)}, status_code=422)
         bus.publish({"type": "state"})
         return out
+
+    # ---- followed artists and their releases --------------------------------
+    def _enqueue_release(rel: dict):
+        p = normalize(rel["url"], storefront())
+        if store.find_by_key(p.kind, p.id, p.track_id):
+            return None, "already in queue or history"
+        return store.add_item(p.normalized, rel["url"], p.kind, p.id, p.track_id, rel["title"], rel["artist"], rel["track_count"]), None
+
+    @app.get("/api/follows")
+    def follows():
+        news = store.new_counts()
+        return [{**f, "new": news.get(f["id"], 0)} for f in store.list_follows()]
+
+    @app.post("/api/follows")
+    async def follow(body: FollowIn):
+        sf = storefront() or "jp"
+        try:
+            artist_id, name = await watcher.client.resolve(body.input, sf)
+        except ReleaseError as e:
+            raise HTTPException(422, str(e))
+        except Exception as e:
+            raise HTTPException(502, f"Apple lookup failed: {type(e).__name__}")
+        fid, created = store.add_follow(artist_id, name, sf, (body.label_filter or "").strip() or None)
+        if created:
+            asyncio.create_task(watcher.check_one(fid))  # baseline the back catalogue right away
+        bus.publish({"type": "releases"})
+        return {"id": fid, "artist_id": artist_id, "name": name, "created": created}
+
+    @app.put("/api/follows/{follow_id}")
+    def patch_follow(follow_id: int, body: FollowPatch):
+        if not store.get_follow(follow_id):
+            raise HTTPException(404, "no such follow")
+        store.update_follow(follow_id, label_filter=(body.label_filter or "").strip() or None)
+        bus.publish({"type": "releases"})
+        return store.get_follow(follow_id)
+
+    @app.delete("/api/follows/{follow_id}")
+    def unfollow(follow_id: int):
+        store.remove_follow(follow_id)
+        bus.publish({"type": "releases"})
+        return {"ok": True}
+
+    @app.post("/api/follows/check")
+    async def check_follows():
+        asyncio.create_task(watcher.check_all(force=True))  # own task: works even when the polling loop is off
+        return {"ok": True}
+
+    @app.get("/api/releases")
+    def releases(status: str = "new"):
+        if status not in ("new", "seen", "added", "dismissed", "all"):
+            raise HTTPException(422, "status must be new, seen, added, dismissed or all")
+        rows = store.list_releases(None if status == "all" else status)
+        return [{**r, "queued": bool(store.find_by_key("album", r["collection_id"], None))} for r in rows]
+
+    @app.post("/api/releases/bulk")
+    def releases_bulk(body: BulkIn):
+        if body.action not in ("add", "dismiss", "restore"):
+            raise HTTPException(422, "action must be add, dismiss or restore")
+        results = []
+        for rid in body.ids:
+            rel = store.get_release(rid)
+            if not rel:
+                results.append({"id": rid, "error": "no such release"})
+                continue
+            if body.action == "add":
+                item_id, err = _enqueue_release(rel)
+                if item_id or err:  # already queued counts as handled
+                    store.set_release_status(rid, "added")
+                results.append({"id": rid, "item_id": item_id, "error": err})
+            else:
+                store.set_release_status(rid, "dismissed" if body.action == "dismiss" else "new")
+                results.append({"id": rid, "error": None})
+        runner.wake()
+        bus.publish({"type": "state"})
+        bus.publish({"type": "releases"})
+        return {"results": results}
 
     @app.get("/api/history")
     def history():

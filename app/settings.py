@@ -18,6 +18,7 @@ DEFAULTS = {
     "library_similar": 0.55,
     "track_retries": 2,
     "retry_backoff": "120-300",
+    "release_check_hours": 6,
 }
 
 
@@ -116,6 +117,7 @@ _RULES = {
     "auto_resume_after_cap": _bool("auto_resume_after_cap"),
     "storefront": _storefront,
     "preview_max_tracks": _int("preview_max_tracks", 1, 5000),
+    "release_check_hours": _int("release_check_hours", 1, 168),
 }
 
 
