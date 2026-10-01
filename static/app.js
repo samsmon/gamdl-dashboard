@@ -218,7 +218,10 @@ function renderSidebar() {
 }
 function renderBanner() {
   const b = $("#banner"), msgs = [];
-  if (S.banner) msgs.push(`${S.banner.kind}: ${S.banner.reason}. Fix the cause, then press Start queue.`);
+  if (S.banner && S.banner.kind === "cap_reached" && S.cap.resume_at) {
+    const left = Math.max(0, Math.ceil(S.cap.resume_at - Date.now() / 1000)), m = Math.floor(left / 60);
+    msgs.push(`daily cap reached (${S.cap.used}/${S.cap.limit} tracks). Cooldown: queue auto-starts in ${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m ${String(left % 60).padStart(2, "0")}s.`);
+  } else if (S.banner) msgs.push(`${S.banner.kind}: ${S.banner.reason}. Fix the cause, then press Start queue.`);
   if (S.cookies.exists && S.cookies.problem) msgs.push(`cookies unusable: ${S.cookies.problem}.`);
   else if (S.cookies.expired) msgs.push("cookies expired: re-export cookies.txt.");
   else if (S.cookies.exists && S.cookies.expiry_days != null && S.cookies.expiry_days <= 7) msgs.push(`cookies expire in ${S.cookies.expiry_days} d: re-export soon.`);
@@ -636,3 +639,4 @@ setInterval(() => document.querySelectorAll("[data-until]").forEach(e => { e.tex
   connect();
   (async function start() { try { await refresh(); renderDTabs(); renderDBody(); say(""); } catch (e) { fail(e); setTimeout(start, 3000); } })();
 })();
+setInterval(() => { if (S && S.banner && S.banner.kind === "cap_reached") renderBanner(); }, 1000);

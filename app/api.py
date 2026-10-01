@@ -21,7 +21,7 @@ from app.cookies import cookie_status
 from app.releases import ReleaseError, Watcher
 from app.library import Library, LibraryMatch
 from app.preview import PreviewService
-from app.runner import Runner
+from app.runner import CAP_RESUME_BUFFER, Runner
 from app.store import Store
 from app.urls import UrlError, normalize, parse_many
 
@@ -125,7 +125,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "now": now, "items": items, "paused": store.get_flag("paused") == "1", "banner": store.get_banner(),
             "settings": s, "disk": {"free_bytes": disk.free_bytes(cfg.disk_path)},
             "cookies": cookie_status(cfg.cookies_path),
-            "cap": {"used": store.count_tracks_since(now - 86400), "limit": s["max_tracks_per_24h"]},
+            "cap": {"used": store.count_tracks_since(now - 86400), "limit": s["max_tracks_per_24h"],
+                    "resume_at": (store.cap_free_at(now, s["max_tracks_per_24h"], s["cap_resume_slots"]) + CAP_RESUME_BUFFER
+                                  if s["auto_resume_after_cap"] and (store.get_banner() or {}).get("kind") == "cap_reached" else None)},
             "forecast_bytes": forecast.queue_bytes(store), "errors": sum(i["errors"] for i in items),
             "releases": {"new": store.count_releases("new"), "follows": len(store.list_follows())},
         }

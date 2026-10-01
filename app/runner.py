@@ -19,6 +19,9 @@ from app.settings import parse_range
 DAY = 86400
 
 
+CAP_RESUME_BUFFER = 60  # seconds past the computed expiry, tolerates clock skew
+
+
 @dataclass
 class _Run:
     errors: int = 0
@@ -140,7 +143,8 @@ class Runner:
             banner = self.store.get_banner()
             s = self.store.get_settings()
             if (banner and banner["kind"] == "cap_reached" and s["auto_resume_after_cap"]
-                    and self.store.count_tracks_since(self._clock() - DAY) < s["max_tracks_per_24h"]):
+                    and self._clock() >= self.store.cap_free_at(
+                        self._clock(), s["max_tracks_per_24h"], s["cap_resume_slots"]) + CAP_RESUME_BUFFER):
                 await self.resume()
             if self.store.get_flag("paused") == "1":
                 return False

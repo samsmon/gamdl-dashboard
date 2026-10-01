@@ -154,6 +154,13 @@ class Store:
         r = self._one("SELECT MIN(ts) AS t FROM finished_tracks WHERE ts>=?", (ts,))
         return r["t"]
 
+    def cap_free_at(self, now, limit, need):
+        """Epoch when at least `need` slots of the 24 h cap are free (<= now if already)."""
+        need = max(1, min(need, limit))
+        ts = [r["ts"] for r in self._all("SELECT ts FROM finished_tracks WHERE ts>=? ORDER BY ts", (now - 86400,))]
+        k = len(ts) - (limit - need)
+        return now if k <= 0 else ts[k - 1] + 86400
+
     # settings / flags
     def get_flag(self, key):
         r = self._one("SELECT v FROM kv WHERE k=?", (key,))
