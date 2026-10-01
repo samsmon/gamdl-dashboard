@@ -62,6 +62,20 @@ def main():
         GamdlDownloaderSyncedLyricsOnlyError,
     )
 
+    from gamdl.api.apple_music import AppleMusicApi
+
+    if storefront:
+        # gamdl 3.x ignores the URL storefront and uses the account storefront (id), whose catalog is romaji;
+        # force the metadata storefront so titles/artists come back in the original language.
+        orig_init = AppleMusicApi.__init__
+
+        def init_forced(self, *a, **kw):
+            orig_init(self, *a, **kw)
+            print(f"[gamdl-safe] metadata storefront {self.storefront} -> {storefront}", flush=True)
+            self.storefront = storefront
+
+        AppleMusicApi.__init__ = init_forced
+
     orig_get = AppleMusicDownloader.get_download_item_from_url
     orig_download = AppleMusicDownloader.download
     state = {"first": True}
