@@ -97,6 +97,8 @@ def main():
             yield item
 
     async def download_delayed(self, item):
+        if item.media.partial:
+            return await orig_download(self, item)  # gamdl's first pass over each track is a no-op (returns early): no fetch, no delay
         try:
             await orig_download(self, item)
         except (GamdlDownloaderMediaFileExistsError, GamdlDownloaderSyncedLyricsOnlyError):
