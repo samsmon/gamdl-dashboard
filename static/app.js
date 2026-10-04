@@ -68,8 +68,7 @@ const STATUS = { downloading: "DOWNLOADING", waiting: "WAITING", queued: "QUEUED
 const RUNNING = ["downloading", "waiting"], PENDING = ["queued", "downloading", "waiting"];
 const FILTERS = [
   ["all", "All", "layers", () => true],
-  ["downloading", "Downloading", "download", i => RUNNING.includes(i.status)],
-  ["queued", "Queued", "clock", i => i.status === "queued"],
+  ["queued", "Queued", "clock", i => PENDING.includes(i.status)],  // running item is listed here too (no separate Downloading view)
   ["completed", "Completed", "check", i => i.status === "done"],
   ["stopped", "Stopped", "stop", i => i.status === "cancelled"],
   ["failed", "Failed", "alert", i => i.status === "error"],
@@ -103,7 +102,8 @@ function caps() {
 }
 function albumPct(it) {
   if (it.status === "done") return 100;
-  if (!it.track_n) return 0;
+  if (!it.track_n || it.status === "queued") return 0;  // queued/retry: track_i is stale from the previous attempt
+  if (it.status === "waiting" && it.live?.delay_kind === "album") return 0;  // waiting before the album starts
   const done = it.status === "waiting" ? it.track_i : (it.track_i || 1) - 1;
   const cur = it.status === "downloading" ? (it.live?.track_pct || 0) / 100 : 0;
   return Math.min(100, ((done + cur) / it.track_n) * 100);
