@@ -317,6 +317,7 @@ class Runner:
                 self._progress(iid)
             elif isinstance(ev, TrackSkip):
                 self.store.upsert_track(iid, ev.i, ev.title, "skipped", ev.reason)
+                self.store.unrecord_last_track()  # skips do not count toward the daily cap
             elif isinstance(ev, TrackError):
                 run.errors += 1
                 self.store.update_item(iid, errors=run.errors)
