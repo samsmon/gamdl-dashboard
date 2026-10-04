@@ -147,10 +147,6 @@ class Store:
     def record_track(self, ts):
         self._exec("INSERT INTO finished_tracks(ts) VALUES(?)", (ts,))
 
-    def unrecord_last_track(self):
-        """Undo the most recent record_track (a skipped track was counted before its Skipping line arrived)."""
-        self._exec("DELETE FROM finished_tracks WHERE rowid=(SELECT MAX(rowid) FROM finished_tracks)")
-
     def count_tracks_since(self, ts):
         return self._one("SELECT COUNT(*) AS n FROM finished_tracks WHERE ts>=?", (ts,))["n"]
 
