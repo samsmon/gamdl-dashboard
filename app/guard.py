@@ -31,6 +31,8 @@ class Guard:
                                f"{self.track_errors} consecutive track errors: possible rate limit or block")
             return None
         if isinstance(ev, Line) and ev.level in ("WARNING", "ERROR", "CRITICAL"):
+            if ev.cls == "token":
+                return Verdict("token_invalid", "Apple Music media-user-token is invalid or expired: paste a new one")
             if ev.cls == "auth":
                 return Verdict("cookies", "authentication failed: re-export cookies.txt")
             if ev.cls == "rate_limit":

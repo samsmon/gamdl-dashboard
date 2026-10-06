@@ -221,11 +221,13 @@ function renderBanner() {
   if (S.banner && S.banner.kind === "cap_reached" && S.cap.resume_at) {
     const left = Math.max(0, Math.ceil(S.cap.resume_at - Date.now() / 1000)), m = Math.floor(left / 60);
     msgs.push(`daily cap reached (${S.cap.used}/${S.cap.limit} tracks). Cooldown: queue auto-starts in ${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m ${String(left % 60).padStart(2, "0")}s.`);
-  } else if (S.banner) msgs.push(`${S.banner.kind}: ${S.banner.reason}. Fix the cause, then press Start queue.`);
+  } else if (S.banner && S.banner.kind === "token_invalid") msgs.push("Apple Music token invalid: the queue is paused. Paste a new token to resume.");
+  else if (S.banner) msgs.push(`${S.banner.kind}: ${S.banner.reason}. Fix the cause, then press Start queue.`);
   if (S.cookies.exists && S.cookies.problem) msgs.push(`cookies unusable: ${S.cookies.problem}.`);
   else if (S.cookies.expired) msgs.push("cookies expired: re-export cookies.txt.");
   else if (S.cookies.exists && S.cookies.expiry_days != null && S.cookies.expiry_days <= 7) msgs.push(`cookies expire in ${S.cookies.expiry_days} d: re-export soon.`);
   b.hidden = msgs.length === 0; b.textContent = msgs.join(" ");
+  maybeTokenModal();
 }
 function renderStatus() {
   const run = S.items.find(i => RUNNING.includes(i.status)), n = f => S.items.filter(f).length;
@@ -419,6 +421,44 @@ function openModal(title, build) {
   (overlay.querySelector("textarea, input") || overlay.querySelector("footer button:last-child")).focus();
   return close;
 }
+function tokenStatus() {
+  const c = S.cookies;
+  if (!c.exists) return "cookies file missing";
+  if (c.problem) return "no media-user-token in the cookies file";
+  const age = c.age_days == null ? "" : `, file updated ${Math.round(c.age_days)} d ago`;
+  const exp = c.expired ? ", cookies expired" : c.expiry_days != null ? `, expires in ${c.expiry_days} d` : "";
+  return `token set (hidden)${age}${exp}`;
+}
+function tokenForm(onSaved) {
+  const input = h("input", { type: "password", id: "f-token", autocomplete: "off", spellcheck: "false", placeholder: "paste media-user-token" });
+  const msg = h("div", { class: "msg", role: "status" });
+  const save = h("button", { type: "button", class: "tb primary", onclick: async () => {
+    const token = input.value.trim();
+    if (!token) { msg.className = "msg err"; msg.textContent = "paste the token first"; input.focus(); return; }
+    save.disabled = true; msg.className = "msg"; msg.textContent = "saving...";
+    try {
+      await api("token", { method: "POST", body: { token } });
+      input.value = ""; msg.textContent = "token saved (hidden)";
+      await refresh().catch(fail); if (onSaved) onSaved();
+    } catch (e) { msg.className = "msg err"; msg.textContent = e.message; } finally { save.disabled = false; }
+  } }, "Save token");
+  return { input, msg, save };
+}
+let tokenModalOpen = false;
+function maybeTokenModal() {
+  if (tokenModalOpen || !S.banner || S.banner.kind !== "token_invalid") return;
+  tokenModalOpen = true;
+  openModal("Apple Music token invalid", close => {
+    const f = tokenForm(() => close());
+    const done = () => { tokenModalOpen = false; close(); };
+    f.save.addEventListener("click", () => setTimeout(() => { if (!$("#f-token")) tokenModalOpen = false; }, 0));
+    return { body: [h("p", {}, "gamdl could not authenticate: the media-user-token is invalid or expired. The queue is paused. Paste a new token to resume."),
+      h("div", { class: "field" }, h("label", { for: "f-token", class: "dim" }, "media-user-token"), f.input), f.msg],
+      footer: [h("button", { type: "button", class: "tb", onclick: done }, "Later"), f.save] };
+  });
+  const root = $("#modal-root");
+  new MutationObserver((_, o) => { if (!root.querySelector("[aria-label='Apple Music token invalid']")) { tokenModalOpen = false; o.disconnect(); } }).observe(root, { childList: true });
+}
 function openAdd() {
   openModal("Add URLs", close => {
     const ta = h("textarea", { spellcheck: "false", "aria-label": "urls", placeholder: "https://music.apple.com/jp/album/...\none URL per line" });
@@ -476,7 +516,10 @@ async function openSettings() {
       }
       try { await api("settings", { method: "PUT", body }); refresh().catch(fail); close(); say(""); } catch (e) { msg.className = "msg err"; msg.textContent = e.message; }
     } }, "Save");
-    return { body: [...rows, msg], footer: [h("button", { type: "button", class: "tb", onclick: close }, "Cancel"), save] };
+    const tf = tokenForm();
+    const tokBox = h("div", {}, h("h4", {}, "Apple Music token"), h("div", { class: "dim" }, tokenStatus()),
+      h("div", { class: "field" }, h("label", { for: "f-token", class: "dim" }, "new media-user-token"), tf.input), h("div", {}, tf.save), tf.msg);
+    return { body: [...rows, msg, tokBox], footer: [h("button", { type: "button", class: "tb", onclick: close }, "Cancel"), save] };
   });
 }
 

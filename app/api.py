@@ -17,7 +17,7 @@ from app import disk, forecast
 from app.bus import EventBus
 from app.catalog import Catalog, staging_match
 from app.config import Config, from_env
-from app.cookies import cookie_status
+from app.cookies import cookie_status, set_media_user_token, valid_token
 from app.releases import ReleaseError, Watcher
 from app.library import Library, LibraryMatch
 from app.preview import PreviewService
@@ -61,6 +61,10 @@ class FollowIn(BaseModel):
 
 class FollowPatch(BaseModel):
     label_filter: str | None = Field(default=None, max_length=100)
+
+
+class TokenIn(BaseModel):
+    token: str = Field(repr=False)
 
 
 class BulkIn(BaseModel):
@@ -118,6 +122,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     def storefront() -> str:
         return store.get_settings()["storefront"]
 
+    def _resume_at(free_at, now):
+        return now if free_at <= now else free_at + CAP_RESUME_BUFFER
+
     def snapshot() -> dict:
         s, now = store.get_settings(), time.time()
         items = [_public(i, dict(runner.live) if i["id"] == runner.current_id else None) for i in store.list_items()]
@@ -126,7 +133,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "settings": s, "disk": {"free_bytes": disk.free_bytes(cfg.disk_path)},
             "cookies": cookie_status(cfg.cookies_path),
             "cap": {"used": store.count_tracks_since(now - 86400), "limit": s["max_tracks_per_24h"],
-                    "resume_at": (store.cap_free_at(now, s["max_tracks_per_24h"], s["cap_resume_slots"]) + CAP_RESUME_BUFFER
+                    "resume_at": (_resume_at(store.cap_free_at(now, s["max_tracks_per_24h"], s["cap_resume_slots"]), now)
                                   if s["auto_resume_after_cap"] and (store.get_banner() or {}).get("kind") == "cap_reached" else None)},
             "forecast_bytes": forecast.queue_bytes(store), "errors": sum(i["errors"] for i in items),
             "releases": {"new": store.count_releases("new"), "follows": len(store.list_follows())},
@@ -269,6 +276,22 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     @app.post("/api/resume")
     async def resume():
         await runner.resume()
+        return {"ok": True}
+
+    @app.post("/api/token")
+    async def put_token(body: TokenIn):
+        token = body.token.strip()
+        if not valid_token(token):
+            return JSONResponse({"detail": "token must be one line of printable characters without spaces (max 4096)"}, status_code=422)
+        try:
+            await asyncio.to_thread(set_media_user_token, cfg.cookies_path, token)
+        except OSError:
+            return JSONResponse({"detail": "could not write the cookies file"}, status_code=500)
+        store.add_log(None, "INFO", "media-user-token updated", time.time())
+        if (store.get_banner() or {}).get("kind") == "token_invalid":
+            await runner.resume()
+        else:
+            bus.publish({"type": "state"})
         return {"ok": True}
 
     @app.get("/api/settings")

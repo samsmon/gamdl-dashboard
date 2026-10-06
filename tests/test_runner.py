@@ -493,3 +493,26 @@ async def test_prefetch_failure_never_breaks_the_download(env):
     a = add(store, 1)
     await runner.step()
     assert store.get_item(a)["status"] == "done"
+
+
+async def test_token_error_pauses_with_token_invalid_and_does_not_burn_retries(env):
+    runner, store, _, mp = env
+    store.put_settings({"track_retries": 3})
+    mp.setenv("FAKE_SCENARIO", "token")
+    a = add(store, 1)
+    await runner.step()
+    assert store.get_banner()["kind"] == "token_invalid"
+    assert store.get_flag("paused") == "1"
+    it = store.get_item(a)
+    assert it["status"] == "queued" and it["attempts"] == 0
+    assert await runner.step() is False  # stays paused, nothing runs
+
+
+async def test_cap_auto_resumes_when_window_is_empty(env):
+    runner, store, _, _ = env
+    store.put_settings({"max_tracks_per_24h": 2, "auto_resume_after_cap": True})
+    store.set_flag("paused", "1")
+    store.set_banner("cap_reached", "2 tracks in 24 h")  # nothing recorded in the last 24 h
+    a = add(store, 1)
+    assert await runner.step() is True
+    assert store.get_banner() is None and store.get_item(a)["status"] == "done"

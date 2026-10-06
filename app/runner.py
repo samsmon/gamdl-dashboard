@@ -142,10 +142,12 @@ class Runner:
         async with self._lock:
             banner = self.store.get_banner()
             s = self.store.get_settings()
-            if (banner and banner["kind"] == "cap_reached" and s["auto_resume_after_cap"]
-                    and self._clock() >= self.store.cap_free_at(
-                        self._clock(), s["max_tracks_per_24h"], s["cap_resume_slots"]) + CAP_RESUME_BUFFER):
-                await self.resume()
+            if banner and banner["kind"] == "cap_reached" and s["auto_resume_after_cap"]:
+                now = self._clock()
+                free_at = self.store.cap_free_at(now, s["max_tracks_per_24h"], s["cap_resume_slots"])
+                # free_at <= now: slots already free (e.g. window empty); buffer only guards a computed future expiry
+                if free_at <= now or now >= free_at + CAP_RESUME_BUFFER:
+                    await self.resume()
             if self.store.get_flag("paused") == "1":
                 return False
             item = self.store.next_queued(self._clock())  # skips items still backing off (not_before)

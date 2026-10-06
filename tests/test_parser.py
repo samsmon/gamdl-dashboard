@@ -82,3 +82,10 @@ def test_unprefixed_traceback_inherits_error_level():
     assert ln.level == "ERROR" and ln.cls == "rate_limit"
     assert parse_line(line, prev_level="INFO")[-1].cls == "other"
     assert parse_line(line)[-1].cls == "other"
+
+
+def test_token_errors_are_classified():
+    from app.parser import classify
+    assert classify("ERROR", "Error fetching account info") == "token"
+    assert classify("ERROR", "GamdlApiResponseError: Error fetching MusicKit content") == "token"
+    assert classify("INFO", "Error fetching account info") == "other"

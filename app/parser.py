@@ -12,6 +12,7 @@ _ERRDL = re.compile(r'Error downloading\s+"(.*?)"')
 _FINISHED = re.compile(r"Finished with (\d+) error")
 _RATE = re.compile(r"\b(?:429|403)\b|too many requests|rate.?limit", re.I)
 _AUTH = re.compile(r"\b401\b|cookies?|not (?:logged|signed) in|subscription|unauthori[sz]ed", re.I)
+_TOKEN = re.compile(r"error fetching (?:account info|musickit content)", re.I)
 _QUOTED = re.compile(r'"[^"]*"')
 
 
@@ -76,6 +77,8 @@ def classify(level: str, body: str) -> str:
     if level not in ("WARNING", "ERROR", "CRITICAL"):
         return "other"
     scrubbed = _QUOTED.sub('""', body)
+    if _TOKEN.search(scrubbed):
+        return "token"
     if _RATE.search(scrubbed):
         return "rate_limit"
     if _AUTH.search(scrubbed):

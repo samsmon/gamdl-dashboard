@@ -56,6 +56,10 @@ for i in range(1, tracks + 1):
             say('[ERROR    19:00:02] Error downloading "Song 2": read timeout\n')
             failed += 1
             continue
+    if scenario == "token":
+        say("[ERROR    19:00:01] Error fetching account info\n")
+        time.sleep(30)
+        continue
     if scenario == "auth":
         say('[ERROR    19:00:01] Error downloading "Song 1": 401 Unauthorized, invalid cookies\n')
         time.sleep(30)
