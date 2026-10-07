@@ -13,6 +13,7 @@ _FINISHED = re.compile(r"Finished with (\d+) error")
 _RATE = re.compile(r"\b(?:429|403)\b|too many requests|rate.?limit", re.I)
 _AUTH = re.compile(r"\b401\b|cookies?|not (?:logged|signed) in|subscription|unauthori[sz]ed", re.I)
 _TOKEN = re.compile(r"error fetching (?:account info|musickit content)", re.I)
+_UNAVAIL = re.compile(r"error fetching wrapper playback|playback_dispatch_failed|currently unavailable", re.I)
 _QUOTED = re.compile(r'"[^"]*"')
 
 
@@ -77,6 +78,8 @@ def classify(level: str, body: str) -> str:
     if level not in ("WARNING", "ERROR", "CRITICAL"):
         return "other"
     scrubbed = _QUOTED.sub('""', body)
+    if _UNAVAIL.search(scrubbed):  # wrapper cannot play the track on this account storefront: not a rate limit
+        return "unavailable"
     if _TOKEN.search(scrubbed):
         return "token"
     if _RATE.search(scrubbed):

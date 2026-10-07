@@ -35,6 +35,8 @@ class _Run:
     bad: bool = False      # saw rate-limit/auth/token text: never treat as a region failure
     sf_errors: int = 0
     region: bool = False
+    unavail: int = 0        # track errors that coincided with the wrapper-unavailable signature
+    unavail_seen: bool = False  # signature seen since the last track start
 
 
 def _group_kwargs() -> dict:
@@ -315,7 +317,15 @@ class Runner:
         for ev in parse_line(raw, self._last_level):
             if isinstance(ev, (TrackStart, TrackSkip, TrackError, TrackDelay)):
                 self.bus.publish({"type": "tracks", "item_id": iid})  # UI reloads the open track list
-            if isinstance(ev, TrackError) and run.suspect and run.ok == 0 and not run.bad:
+            if isinstance(ev, TrackStart):
+                run.unavail_seen = False
+            elif isinstance(ev, Line) and ev.cls == "unavailable":
+                run.unavail_seen = True
+            if isinstance(ev, TrackError) and run.unavail_seen:
+                v = None  # unavailable on the account storefront: not rate limit, not region fallback (futile)
+                run.unavail += 1
+                run.unavail_seen = False
+            elif isinstance(ev, TrackError) and run.suspect and run.ok == 0 and not run.bad:
                 v = None  # region-only albums fail under the forced storefront: not a rate limit (decided in _finish)
                 run.sf_errors += 1
                 if run.sf_errors >= 2 and run.verdict is None and not run.region:
@@ -407,6 +417,14 @@ class Runner:
             fields.update(status="cancelled")
         elif run.paused_stop or self._stopping:
             fields.update(status="queued")
+        elif run.unavail > 0 and not run.bad and run.unavail >= run.errors and (
+                run.finished is None or run.unavail >= run.finished):
+            errors = max(run.errors, run.finished or 0)
+            fields.update(status="error", errors=errors, not_before=None, error_msg=(
+                f"unavailable for the account storefront: wrapper cannot play {run.unavail} track(s) "
+                "(region-only album, e.g. jp-only? needs an Apple Music account in that storefront); not retried"))
+            self.store.add_log(iid, "WARNING", "[dashboard] tracks unavailable for the account storefront, not retrying", now)
+            self.guard.reset()
         elif run.suspect and not run.bad and run.ok == 0 and run.errors > 0 and (
                 run.region or (rc == 0 and run.finished is not None)):
             sf = self.store.get_settings()["storefront"]

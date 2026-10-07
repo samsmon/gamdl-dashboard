@@ -582,3 +582,44 @@ async def test_cap_auto_resumes_when_window_is_empty(env):
     a = add(store, 1)
     assert await runner.step() is True
     assert store.get_banner() is None and store.get_item(a)["status"] == "done"
+
+
+async def test_unavailable_tracks_end_cleanly(env, tmp_path):
+    runner, store, _, mp = env
+    log = tmp_path / "env.log"
+    mp.setenv("FAKE_SCENARIO", "unavailable")
+    mp.setenv("FAKE_ENVLOG", str(log))
+    mp.setenv("FAKE_TRACKS", "5")
+    store.put_settings({"track_retries": 2})
+    a = store.add_item("https://music.apple.com/jp/album/7", "https://music.apple.com/jp/album/7", "album", "7")
+    b = add(store, 8)
+    await runner.step()
+    it = store.get_item(a)
+    assert it["status"] == "error" and it["attempts"] == 0 and it["errors"] == 5 and it["sf_fallback"] in (0, None)
+    assert "unavailable for the account storefront" in it["error_msg"] and "not retried" in it["error_msg"]
+    assert store.get_banner() is None and store.get_flag("paused") != "1"
+    mp.setenv("FAKE_SCENARIO", "ok")
+    await runner.step()  # queue keeps flowing, no fallback run of item a
+    assert store.get_item(b)["status"] == "done" and store.get_item(a)["status"] == "error"
+    assert store.get_banner() is None
+
+
+async def test_unavailable_partial_is_final_not_retried(env):
+    runner, store, _, mp = env
+    mp.setenv("FAKE_SCENARIO", "unavailable_partial")
+    store.put_settings({"track_retries": 2})
+    a = add(store, 1)
+    await runner.step()
+    it = store.get_item(a)
+    assert it["status"] == "error" and it["attempts"] == 0 and it["errors"] == 1
+    assert "unavailable for the account storefront" in it["error_msg"]
+    assert store.get_banner() is None and store.get_flag("paused") != "1"
+
+
+async def test_real_429_still_halts_after_unavailable_support(env):
+    runner, store, _, mp = env
+    mp.setenv("FAKE_SCENARIO", "rate_limit")
+    mp.setenv("FAKE_TRACKS", "6")
+    a = add(store, 1)
+    await runner.step()
+    assert store.get_banner()["kind"] == "rate_limited" and store.get_item(a)["status"] == "queued"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Stand-in for gamdl-safe used by tests and local dev. Scenario via FAKE_SCENARIO:
-ok | region | rate_limit | auth | slow | crash | busy | flaky | fail | errors_no_text | traceback_429. Never talks to the network.
+ok | region | rate_limit | auth | slow | crash | busy | flaky | fail | errors_no_text | traceback_429 | unavailable. Never talks to the network.
 flaky/fail: track 2 raises a non-rate-limit error ("read timeout"); flaky succeeds on the next
 run when FAKE_STATE points at a file path that survives between runs."""
 import os
@@ -41,6 +41,13 @@ for i in range(1, tracks + 1):
     say("\n")
     if region_fail:
         say(f'[ERROR    19:00:{i:02d}] Error downloading "Song {i}"\n')
+        failed += 1
+        continue
+    if scenario == "unavailable" or (scenario == "unavailable_partial" and i == 2):
+        say("[ERROR    19:00:01] Failed to process\n")
+        say("gamdl.api.exceptions.GamdlApiResponseError: Error fetching wrapper playback (Status code: 502): "
+            '{"detail":"Apple store error code=1159012072","error":"playback_dispatch_failed"}\n')
+        say(f'[ERROR    19:00:{i:02d}] [Track {i}/{tracks} ] Error downloading "Song {i}"\n')
         failed += 1
         continue
     if scenario == "rate_limit":
