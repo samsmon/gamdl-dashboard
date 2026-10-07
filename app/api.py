@@ -251,7 +251,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             other = store.find_by_key(item["kind"], item["ext_id"], item["track_id"])
             if other and other["id"] != item_id:
                 raise HTTPException(409, f"already queued as item {other['id']}")
-            fields = {"status": "queued", "error_msg": None, "errors": 0, "attempts": 0, "not_before": None}
+            fields = {"status": "queued", "error_msg": None, "errors": 0, "attempts": 0, "not_before": None,
+                      "sf_fallback": 0}
             if action == "retry_original":
                 try:
                     fields["url"] = normalize(item["original_url"], None).normalized

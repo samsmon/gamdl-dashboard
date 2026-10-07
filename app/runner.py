@@ -15,6 +15,7 @@ from app.releases import Itunes, display_title
 from app.parser import (AlbumDelay, Finished, Line, LineSplitter, Progress, TrackDelay, TrackError,
                         TrackSkip, TrackStart, UrlStart, parse_line)
 from app.settings import parse_range
+from app.urls import UrlError, normalize
 
 DAY = 86400
 
@@ -29,6 +30,11 @@ class _Run:
     busy: bool = False
     verdict: object = None
     paused_stop: bool = False
+    suspect: bool = False  # forced metadata storefront in use and nothing downloaded yet: errors may be region-only
+    ok: int = 0            # tracks downloaded or skipped (exists) in this run
+    bad: bool = False      # saw rate-limit/auth/token text: never treat as a region failure
+    sf_errors: int = 0
+    region: bool = False
 
 
 def _group_kwargs() -> dict:
@@ -227,18 +233,25 @@ class Runner:
         iid = item["id"]
         s = self.store.get_settings()
         env = os.environ.copy()
-        env.update(GAMDL_TRACK_DELAY=s["track_delay"], GAMDL_ALBUM_DELAY=s["album_delay"],
-                   GAMDL_STOREFRONT=s["storefront"])
+        fallback = bool(item.get("sf_fallback"))
+        forced = "" if fallback else s["storefront"]  # fallback: original storefront, no metadata forcing
+        env.update(GAMDL_TRACK_DELAY=s["track_delay"], GAMDL_ALBUM_DELAY=s["album_delay"], GAMDL_STOREFRONT=forced)
         self.guard.threshold = s["error_threshold"]
         self.current_id, self.live = iid, {"track_pct": 0.0}
         self._pause_after_track = self._cancel = False
         self._last_level = "INFO"
         self.store.clear_tracks(iid)
         self.store.update_item(iid, status="downloading", started_at=self._clock(), finished_at=None,
-                               error_msg=None, errors=0, track_i=None, track_n=None, findings=None)
+                               error_msg="retrying with original storefront" if fallback else None, errors=0, track_i=None, track_n=None, findings=None)
         self._state()
         await self._prefetch(item)
-        argv = [*self.cfg.gamdl_cmd, *self.cfg.extra_args, item["url"]]
+        url = item["url"]
+        if fallback and item["original_url"]:
+            try:
+                url = normalize(item["original_url"], None).normalized
+            except UrlError:
+                pass
+        argv = [*self.cfg.gamdl_cmd, *self.cfg.extra_args, url]
         try:
             self.proc = await asyncio.create_subprocess_exec(
                 *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=env, **_group_kwargs())
@@ -248,7 +261,7 @@ class Runner:
             self._halt("gamdl_missing", f"cannot start {self.cfg.gamdl_cmd[0]}")
             self.current_id, self.live = None, {}
             return
-        run = self._run = _Run()
+        run = self._run = _Run(suspect=bool(forced))
         proc = self.proc
         try:
             splitter, dec = LineSplitter(), codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -302,7 +315,18 @@ class Runner:
         for ev in parse_line(raw, self._last_level):
             if isinstance(ev, (TrackStart, TrackSkip, TrackError, TrackDelay)):
                 self.bus.publish({"type": "tracks", "item_id": iid})  # UI reloads the open track list
-            v = self.guard.on_event(ev)
+            if isinstance(ev, TrackError) and run.suspect and run.ok == 0 and not run.bad:
+                v = None  # region-only albums fail under the forced storefront: not a rate limit (decided in _finish)
+                run.sf_errors += 1
+                if run.sf_errors >= 2 and run.verdict is None and not run.region:
+                    run.region = True
+                    self._signal(signal.SIGTERM)
+            else:
+                v = self.guard.on_event(ev)
+            if isinstance(ev, Line) and ev.cls in ("rate_limit", "auth", "token"):
+                run.bad = True
+            if isinstance(ev, (TrackSkip, TrackDelay)):
+                run.ok += 1
             if v and run.verdict is None:
                 run.verdict = v
                 self._signal(signal.SIGTERM)
@@ -357,7 +381,10 @@ class Runner:
         """Track errors that are not rate-limit/auth: retry the album after a backoff, then give up.
         gamdl skips files that already exist (overwrite=false), so a re-run only fetches what is missing."""
         s = self.store.get_settings()
-        attempts = self.store.get_item(item["id"])["attempts"]
+        cur = self.store.get_item(item["id"])
+        attempts = cur["attempts"]
+        if cur.get("sf_fallback"):
+            msg = f"unavailable on forced storefront, retried with original storefront: {msg}"
         if attempts < s["track_retries"]:
             lo, hi = parse_range(s["retry_backoff"])
             fields.update(status="queued", attempts=attempts + 1, not_before=self._clock() + self._rand(lo, hi),
@@ -380,6 +407,13 @@ class Runner:
             fields.update(status="cancelled")
         elif run.paused_stop or self._stopping:
             fields.update(status="queued")
+        elif run.suspect and not run.bad and run.ok == 0 and run.errors > 0 and (
+                run.region or (rc == 0 and run.finished is not None)):
+            sf = self.store.get_settings()["storefront"]
+            msg = f"unavailable on storefront {sf}; retrying with original storefront"
+            fields.update(status="queued", error_msg=msg, errors=0, not_before=None, sf_fallback=1)
+            self.store.add_log(iid, "WARNING", f"[dashboard] {msg}", now)
+            self.guard.reset()
         elif rc == 0 and run.finished is not None:
             errors = max(run.errors, run.finished)
             if errors == 0:

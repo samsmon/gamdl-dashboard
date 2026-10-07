@@ -9,7 +9,7 @@ _ITEM_COLS = {
     "url", "original_url", "kind", "ext_id", "track_id", "status", "position", "title", "artist",
     "expected_tracks", "url_i", "url_n", "track_i", "track_n", "current_title", "errors",
     "output_path", "size_bytes", "error_msg", "findings", "created_at", "started_at", "finished_at",
-    "attempts", "not_before", "codec", "classification", "library_status", "library_note", "meta",
+    "attempts", "not_before", "sf_fallback", "codec", "classification", "library_status", "library_note", "meta",
 }
 
 _SCHEMA = """
@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS items(
   track_i INTEGER, track_n INTEGER, current_title TEXT, errors INTEGER NOT NULL DEFAULT 0,
   output_path TEXT, size_bytes INTEGER, error_msg TEXT, findings TEXT,
   created_at REAL, started_at REAL, finished_at REAL,
-  attempts INTEGER NOT NULL DEFAULT 0, not_before REAL, codec TEXT, classification TEXT, library_status TEXT, library_note TEXT, meta TEXT);
+  attempts INTEGER NOT NULL DEFAULT 0, not_before REAL, codec TEXT, classification TEXT, library_status TEXT, library_note TEXT, meta TEXT, sf_fallback INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS tracks(
   item_id INTEGER NOT NULL, idx INTEGER NOT NULL, title TEXT, status TEXT, reason TEXT, duration_ms INTEGER, artist TEXT,
   PRIMARY KEY(item_id, idx));
@@ -48,6 +48,8 @@ class Store:
             self._db.executescript(_SCHEMA)
             if "library_note" not in {r["name"] for r in self._db.execute("PRAGMA table_info(items)")}:
                 self._db.execute("ALTER TABLE items ADD COLUMN library_note TEXT")  # DBs created before the post-download check
+            if "sf_fallback" not in {r["name"] for r in self._db.execute("PRAGMA table_info(items)")}:
+                self._db.execute("ALTER TABLE items ADD COLUMN sf_fallback INTEGER NOT NULL DEFAULT 0")  # storefront fallback tried
             if "meta" not in {r["name"] for r in self._db.execute("PRAGMA table_info(items)")}:
                 self._db.execute("ALTER TABLE items ADD COLUMN meta TEXT")
             have = {r["name"] for r in self._db.execute("PRAGMA table_info(tracks)")}

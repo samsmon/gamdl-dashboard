@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Stand-in for gamdl-safe used by tests and local dev. Scenario via FAKE_SCENARIO:
-ok | rate_limit | auth | slow | crash | busy | flaky | fail | errors_no_text | traceback_429. Never talks to the network.
+ok | region | rate_limit | auth | slow | crash | busy | flaky | fail | errors_no_text | traceback_429. Never talks to the network.
 flaky/fail: track 2 raises a non-rate-limit error ("read timeout"); flaky succeeds on the next
 run when FAKE_STATE points at a file path that survives between runs."""
 import os
@@ -24,6 +24,10 @@ if scenario == "busy":
     say("gamdl-safe already running (lock held) - refusing to run in parallel\n")
     sys.exit(1)
 
+region_fail = scenario == "region" and bool(os.environ.get("GAMDL_STOREFRONT"))  # fails only while storefront is forced
+if scenario == "region" and os.environ.get("FAKE_ENVLOG"):
+    with open(os.environ["FAKE_ENVLOG"], "a") as fh:
+        fh.write(f"{os.environ.get('GAMDL_STOREFRONT', '')}|{url}\n")
 say(f'[INFO     19:00:00] URL   1/1  Processing "{url}"\n')
 failed = 0
 for i in range(1, tracks + 1):
@@ -35,6 +39,10 @@ for i in range(1, tracks + 1):
         say(f"[download]  {pct}% of ~ 5.00MiB at 1.00MiB/s (frag 1/2)\r")
         time.sleep(nap)
     say("\n")
+    if region_fail:
+        say(f'[ERROR    19:00:{i:02d}] Error downloading "Song {i}"\n')
+        failed += 1
+        continue
     if scenario == "rate_limit":
         say(f'[ERROR    19:00:{i:02d}] Error downloading "Song {i}": HTTP 429 Too Many Requests\n')
         continue

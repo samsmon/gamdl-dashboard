@@ -35,6 +35,12 @@ def rewrite_storefront(url, storefront):
     return re.sub(r"(https?://(?:classical\.)?music\.apple\.com/)[a-z]{2}/", rf"\g<1>{storefront}/", url, count=1)
 
 
+def forced_storefront(env=None):
+    """Storefront to force for metadata/URLs; empty = original storefront (used by the dashboard's region fallback run)."""
+    env = os.environ if env is None else env
+    return env.get("GAMDL_STOREFRONT", "jp").strip().lower()
+
+
 def acquire_lock(path=None):
     """Hold an exclusive lock for the process lifetime; refuse to run in parallel. Returns the open file (keep a reference)."""
     try:
@@ -53,7 +59,7 @@ def acquire_lock(path=None):
 def main():
     track = rng("GAMDL_TRACK_DELAY", "8-20")
     album = rng("GAMDL_ALBUM_DELAY", "60-180")
-    storefront = os.environ.get("GAMDL_STOREFRONT", "jp").strip().lower()  # "" disables rewriting
+    storefront = forced_storefront()  # "" disables rewriting
     lock = acquire_lock()  # noqa: F841 (must stay referenced)
 
     from gamdl.downloader.downloader import AppleMusicDownloader

@@ -369,11 +369,77 @@ async def test_errors_without_429_text_still_halt(env):
     mp.setenv("FAKE_SCENARIO", "errors_no_text")
     mp.setenv("FAKE_TRACKS", "6")
     a = add(store, 1)
-    await runner.step()
+    await runner.step()  # first run is treated as a possible region failure: one fallback, no banner yet
+    it = store.get_item(a)
+    assert it["status"] == "queued" and it["sf_fallback"] == 1 and store.get_banner() is None
+    await runner.step()  # fallback run (original storefront) fails the same way: now it halts as before
     it = store.get_item(a)
     assert it["status"] == "queued" and it["attempts"] == 0 and it["not_before"] is None
     assert store.get_banner()["kind"] == "rate_limited" and store.get_flag("paused") == "1"
     assert await runner.step() is False
+
+
+async def test_region_failure_falls_back_once_to_original_storefront(env, tmp_path):
+    runner, store, _, mp = env
+    log = tmp_path / "env.log"
+    mp.setenv("FAKE_SCENARIO", "region")
+    mp.setenv("FAKE_ENVLOG", str(log))
+    mp.setenv("FAKE_TRACKS", "5")
+    a = store.add_item("https://music.apple.com/jp/album/7", "https://music.apple.com/id/album/7", "album", "7")
+    await runner.step()
+    it = store.get_item(a)
+    assert it["status"] == "queued" and it["sf_fallback"] == 1 and it["attempts"] == 0
+    assert "unavailable on storefront jp" in it["error_msg"]
+    assert store.get_banner() is None and store.get_flag("paused") != "1"
+    assert any("retrying with original storefront" in r["text"] for r in store.tail_log())
+    await runner.step()
+    it = store.get_item(a)
+    assert it["status"] == "done" and it["errors"] == 0
+    first, second = log.read_text().splitlines()
+    assert first == "jp|https://music.apple.com/jp/album/7"
+    assert second == "|https://music.apple.com/id/album/7"  # nothing forced, original-storefront URL
+    assert store.get_banner() is None
+
+
+async def test_region_failure_single_unknown_title_error_also_falls_back(env, tmp_path):
+    runner, store, _, mp = env
+    mp.setenv("FAKE_SCENARIO", "region")
+    mp.setenv("FAKE_TRACKS", "1")
+    a = add(store, 8)
+    await runner.step()
+    assert store.get_item(a)["sf_fallback"] == 1 and store.get_banner() is None
+    await runner.step()
+    assert store.get_item(a)["status"] == "done"
+
+
+async def test_region_fallback_not_used_when_storefront_not_forced(env):
+    runner, store, _, mp = env
+    store.put_settings({"storefront": ""})
+    mp.setenv("FAKE_SCENARIO", "errors_no_text")
+    mp.setenv("FAKE_TRACKS", "6")
+    a = add(store, 9)
+    await runner.step()
+    assert store.get_item(a)["sf_fallback"] == 0
+    assert store.get_banner()["kind"] == "rate_limited"
+
+
+async def test_real_rate_limit_text_is_not_a_region_failure(env):
+    runner, store, _, mp = env
+    mp.setenv("FAKE_SCENARIO", "rate_limit")
+    mp.setenv("FAKE_TRACKS", "6")
+    a = add(store, 10)
+    await runner.step()
+    assert store.get_item(a)["sf_fallback"] == 0
+    assert store.get_banner()["kind"] == "rate_limited"
+
+
+async def test_token_invalid_unaffected_by_fallback(env):
+    runner, store, _, mp = env
+    mp.setenv("FAKE_SCENARIO", "token")
+    a = add(store, 11)
+    await runner.step()
+    assert store.get_item(a)["sf_fallback"] == 0
+    assert store.get_banner()["kind"] == "token_invalid"
 
 
 async def test_traceback_429_lines_halt(env):
