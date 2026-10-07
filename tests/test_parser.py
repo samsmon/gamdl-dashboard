@@ -98,3 +98,11 @@ def test_token_errors_are_classified():
     assert classify("ERROR", "Error fetching account info") == "token"
     assert classify("ERROR", "GamdlApiResponseError: Error fetching MusicKit content") == "token"
     assert classify("INFO", "Error fetching account info") == "other"
+
+
+def test_unprefixed_traceback_line_is_classified_unavailable():
+    from app.parser import classify
+    line = 'gamdl.api.exceptions.GamdlApiResponseError: Error fetching wrapper playback (Status code: 502): {"error":"playback_dispatch_failed"}'
+    assert classify("INFO", line) == "unavailable"
+    assert classify("ERROR", line) == "unavailable"
+    assert classify("INFO", "Downloading something") == "other"
