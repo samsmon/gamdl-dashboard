@@ -417,7 +417,20 @@ class Runner:
             fields.update(status="cancelled")
         elif run.paused_stop or self._stopping:
             fields.update(status="queued")
-        elif run.unavail > 0 and not run.bad and run.unavail >= run.errors and (
+        elif run.unavail > 0 and not run.bad and run.unavail >= run.errors and run.ok > 0 and (
+                run.finished is None or run.unavail >= run.finished):
+            # some tracks are not streamable: skip them, finish the album with a condition (done + finding)
+            fields.update(status="done", errors=0, not_before=None)
+            try:
+                fields.update(await asyncio.to_thread(self._describe_output, item))
+            except Exception as e:
+                fields["findings"] = json.dumps([f"post-download check failed: {type(e).__name__}"])
+            fl = json.loads(fields.get("findings") or "[]")
+            fl.insert(0, f"{run.unavail} track(s) not streamable on this account, skipped")
+            fields["findings"] = json.dumps(fl)
+            self.store.add_log(iid, "WARNING", f"[dashboard] {run.unavail} unavailable track(s) skipped, album finished with condition", now)
+            self.guard.reset()
+        elif run.unavail > 0 and not run.bad and run.unavail >= run.errors and not (run.suspect and run.ok == 0) and (
                 run.finished is None or run.unavail >= run.finished):
             errors = max(run.errors, run.finished or 0)
             fields.update(status="error", errors=errors, not_before=None, error_msg=(
