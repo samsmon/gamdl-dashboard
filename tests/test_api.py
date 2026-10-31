@@ -92,7 +92,7 @@ def test_retry_original_uses_original_storefront(client):
 def test_settings_roundtrip_and_validation(client):
     assert client.get("/api/settings").json()["storefront"] == "jp"
     assert client.put("/api/settings", json={"error_threshold": 4}).json()["error_threshold"] == 4
-    bad = client.put("/api/settings", json={"track_delay": "1-2"})
+    bad = client.put("/api/settings", json={"track_delay": "0.5-2"})  # below the 1 s sanity floor
     assert bad.status_code == 422 and "track_delay" in bad.json()["detail"]
 
 
@@ -255,3 +255,66 @@ def test_retry_refused_when_same_album_already_queued(client):
     for action in ("retry", "retry_original"):
         r = client.post(f"/api/queue/{a}/{action}")
         assert r.status_code == 409 and r.json()["detail"] == f"already queued as item {b}"
+
+
+TOKEN = "TOKEN-SECRET-VALUE-123"
+MUT = ".music.apple.com\tTRUE\t/\tTRUE\t4102444800\tmedia-user-token\t"
+
+
+def _cookies(client):
+    return Path(client.cfg.cookies_path)
+
+
+def test_token_replaces_only_that_line_keeps_mode_backup_and_hides_value(client):
+    import os
+    import stat
+    p = _cookies(client)
+    p.write_text(f".apple.com\tTRUE\t/\tTRUE\t4102444800\tsession\t{CANARY}\n{MUT}OLDTOKEN\n.music.apple.com\tTRUE\t/\tTRUE\t0\tother\tkeep\n")
+    os.chmod(p, 0o600)
+    r = client.post("/api/token", json={"token": TOKEN})
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    lines = p.read_text().splitlines()
+    assert lines[0].endswith(CANARY) and lines[2].endswith("\tother\tkeep")
+    assert lines[1] == f"{MUT}{TOKEN}"
+    if os.name == "posix":
+        assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
+    backups = list(p.parent.glob("cookies.txt.bak-*"))
+    assert len(backups) == 1 and "OLDTOKEN" in backups[0].read_text()
+    assert TOKEN not in r.text and TOKEN not in client.get("/api/state").text and TOKEN not in client.get("/api/log").text
+    assert client.get("/api/state").json()["cookies"]["has_token"] is True
+
+
+def test_token_appended_when_missing(client):
+    r = client.post("/api/token", json={"token": TOKEN})
+    assert r.status_code == 200
+    text = _cookies(client).read_text()
+    assert text.count("media-user-token") == 1 and CANARY in text
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "has space", "tab\there", "line\nbreak", "x" * 5000])
+def test_token_rejected_and_never_echoed(client, bad):
+    before = _cookies(client).read_text()
+    r = client.post("/api/token", json={"token": bad})
+    assert r.status_code == 422 and (not bad.strip() or bad not in r.text)
+    assert _cookies(client).read_text() == before
+
+
+def test_token_clears_token_invalid_banner_and_resumes(client):
+    from app.store import Store
+    s = Store(client.cfg.db_path)
+    s.set_banner("token_invalid", "x")
+    s.set_flag("paused", "1")
+    assert client.get("/api/state").json()["banner"]["kind"] == "token_invalid"
+    assert client.post("/api/token", json={"token": TOKEN}).status_code == 200
+    d = client.get("/api/state").json()
+    assert d["banner"] is None and d["paused"] is False
+
+
+def test_token_keeps_pause_when_banner_is_other(client):
+    from app.store import Store
+    s = Store(client.cfg.db_path)
+    s.set_banner("cap_reached", "x")
+    s.set_flag("paused", "1")
+    client.post("/api/token", json={"token": TOKEN})
+    d = client.get("/api/state").json()
+    assert d["banner"]["kind"] == "cap_reached" and d["paused"] is True

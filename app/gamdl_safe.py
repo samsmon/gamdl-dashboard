@@ -35,6 +35,12 @@ def rewrite_storefront(url, storefront):
     return re.sub(r"(https?://(?:classical\.)?music\.apple\.com/)[a-z]{2}/", rf"\g<1>{storefront}/", url, count=1)
 
 
+def forced_storefront(env=None):
+    """Storefront to force for metadata/URLs; empty = original storefront (used by the dashboard's region fallback run)."""
+    env = os.environ if env is None else env
+    return env.get("GAMDL_STOREFRONT", "jp").strip().lower()
+
+
 def acquire_lock(path=None):
     """Hold an exclusive lock for the process lifetime; refuse to run in parallel. Returns the open file (keep a reference)."""
     try:
@@ -53,7 +59,7 @@ def acquire_lock(path=None):
 def main():
     track = rng("GAMDL_TRACK_DELAY", "8-20")
     album = rng("GAMDL_ALBUM_DELAY", "60-180")
-    storefront = os.environ.get("GAMDL_STOREFRONT", "jp").strip().lower()  # "" disables rewriting
+    storefront = forced_storefront()  # "" disables rewriting
     lock = acquire_lock()  # noqa: F841 (must stay referenced)
 
     from gamdl.downloader.downloader import AppleMusicDownloader
@@ -61,6 +67,20 @@ def main():
         GamdlDownloaderMediaFileExistsError,
         GamdlDownloaderSyncedLyricsOnlyError,
     )
+
+    from gamdl.api.apple_music import AppleMusicApi
+
+    if storefront:
+        # gamdl 3.x ignores the URL storefront and uses the account storefront (id), whose catalog is romaji;
+        # force the metadata storefront so titles/artists come back in the original language.
+        orig_init = AppleMusicApi.__init__
+
+        def init_forced(self, *a, **kw):
+            orig_init(self, *a, **kw)
+            print(f"[gamdl-safe] metadata storefront {self.storefront} -> {storefront}", flush=True)
+            self.storefront = storefront
+
+        AppleMusicApi.__init__ = init_forced
 
     orig_get = AppleMusicDownloader.get_download_item_from_url
     orig_download = AppleMusicDownloader.download
@@ -83,6 +103,8 @@ def main():
             yield item
 
     async def download_delayed(self, item):
+        if item.media.partial:
+            return await orig_download(self, item)  # gamdl's first pass over each track is a no-op (returns early): no fetch, no delay
         try:
             await orig_download(self, item)
         except (GamdlDownloaderMediaFileExistsError, GamdlDownloaderSyncedLyricsOnlyError):

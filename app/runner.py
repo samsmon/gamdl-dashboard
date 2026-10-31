@@ -11,11 +11,16 @@ from dataclasses import dataclass
 from app import checker, disk, forecast
 from app.guard import Guard
 from app.library import Library, library_note, remote_from_dir
+from app.releases import Itunes, display_title
 from app.parser import (AlbumDelay, Finished, Line, LineSplitter, Progress, TrackDelay, TrackError,
                         TrackSkip, TrackStart, UrlStart, parse_line)
 from app.settings import parse_range
+from app.urls import UrlError, normalize
 
 DAY = 86400
+
+
+CAP_RESUME_BUFFER = 60  # seconds past the computed expiry, tolerates clock skew
 
 
 @dataclass
@@ -25,6 +30,13 @@ class _Run:
     busy: bool = False
     verdict: object = None
     paused_stop: bool = False
+    suspect: bool = False  # forced metadata storefront in use and nothing downloaded yet: errors may be region-only
+    ok: int = 0            # tracks downloaded or skipped (exists) in this run
+    bad: bool = False      # saw rate-limit/auth/token text: never treat as a region failure
+    sf_errors: int = 0
+    region: bool = False
+    unavail: int = 0        # track errors that coincided with the wrapper-unavailable signature
+    unavail_seen: bool = False  # signature seen since the last track start
 
 
 def _group_kwargs() -> dict:
@@ -37,6 +49,7 @@ class Runner:
     def __init__(self, store, bus, cfg, sleep=asyncio.sleep, clock=time.time, rand=random.uniform):
         self.store, self.bus, self.cfg = store, bus, cfg
         self.library = Library(cfg.library_csv)
+        self.itunes = Itunes()
         self._sleep, self._clock, self._rand = sleep, clock, rand
         self.proc = None
         self.current_id = None
@@ -137,9 +150,12 @@ class Runner:
         async with self._lock:
             banner = self.store.get_banner()
             s = self.store.get_settings()
-            if (banner and banner["kind"] == "cap_reached" and s["auto_resume_after_cap"]
-                    and self.store.count_tracks_since(self._clock() - DAY) < s["max_tracks_per_24h"]):
-                await self.resume()
+            if banner and banner["kind"] == "cap_reached" and s["auto_resume_after_cap"]:
+                now = self._clock()
+                free_at = self.store.cap_free_at(now, s["max_tracks_per_24h"], s["cap_resume_slots"])
+                # free_at <= now: slots already free (e.g. window empty); buffer only guards a computed future expiry
+                if free_at <= now or now >= free_at + CAP_RESUME_BUFFER:
+                    await self.resume()
             if self.store.get_flag("paused") == "1":
                 return False
             item = self.store.next_queued(self._clock())  # skips items still backing off (not_before)
@@ -219,17 +235,25 @@ class Runner:
         iid = item["id"]
         s = self.store.get_settings()
         env = os.environ.copy()
-        env.update(GAMDL_TRACK_DELAY=s["track_delay"], GAMDL_ALBUM_DELAY=s["album_delay"],
-                   GAMDL_STOREFRONT=s["storefront"])
+        fallback = bool(item.get("sf_fallback"))
+        forced = "" if fallback else s["storefront"]  # fallback: original storefront, no metadata forcing
+        env.update(GAMDL_TRACK_DELAY=s["track_delay"], GAMDL_ALBUM_DELAY=s["album_delay"], GAMDL_STOREFRONT=forced)
         self.guard.threshold = s["error_threshold"]
         self.current_id, self.live = iid, {"track_pct": 0.0}
         self._pause_after_track = self._cancel = False
         self._last_level = "INFO"
         self.store.clear_tracks(iid)
         self.store.update_item(iid, status="downloading", started_at=self._clock(), finished_at=None,
-                               error_msg=None, errors=0, track_i=None, track_n=None, findings=None)
+                               error_msg="retrying with original storefront" if fallback else None, errors=0, track_i=None, track_n=None, findings=None)
         self._state()
-        argv = [*self.cfg.gamdl_cmd, *self.cfg.extra_args, item["url"]]
+        await self._prefetch(item)
+        url = item["url"]
+        if fallback and item["original_url"]:
+            try:
+                url = normalize(item["original_url"], None).normalized
+            except UrlError:
+                pass
+        argv = [*self.cfg.gamdl_cmd, *self.cfg.extra_args, url]
         try:
             self.proc = await asyncio.create_subprocess_exec(
                 *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=env, **_group_kwargs())
@@ -239,7 +263,7 @@ class Runner:
             self._halt("gamdl_missing", f"cannot start {self.cfg.gamdl_cmd[0]}")
             self.current_id, self.live = None, {}
             return
-        run = self._run = _Run()
+        run = self._run = _Run(suspect=bool(forced))
         proc = self.proc
         try:
             splitter, dec = LineSplitter(), codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -293,7 +317,26 @@ class Runner:
         for ev in parse_line(raw, self._last_level):
             if isinstance(ev, (TrackStart, TrackSkip, TrackError, TrackDelay)):
                 self.bus.publish({"type": "tracks", "item_id": iid})  # UI reloads the open track list
-            v = self.guard.on_event(ev)
+            if isinstance(ev, TrackStart):
+                run.unavail_seen = False
+            elif isinstance(ev, Line) and ev.cls == "unavailable":
+                run.unavail_seen = True
+            if isinstance(ev, TrackError) and run.unavail_seen:
+                v = None  # unavailable on the account storefront: not rate limit, not region fallback (futile)
+                run.unavail += 1
+                run.unavail_seen = False
+            elif isinstance(ev, TrackError) and run.suspect and run.ok == 0 and not run.bad:
+                v = None  # region-only albums fail under the forced storefront: not a rate limit (decided in _finish)
+                run.sf_errors += 1
+                if run.sf_errors >= 2 and run.verdict is None and not run.region:
+                    run.region = True
+                    self._signal(signal.SIGTERM)
+            else:
+                v = self.guard.on_event(ev)
+            if isinstance(ev, Line) and ev.cls in ("rate_limit", "auth", "token"):
+                run.bad = True
+            if isinstance(ev, (TrackSkip, TrackDelay)):
+                run.ok += 1
             if v and run.verdict is None:
                 run.verdict = v
                 self._signal(signal.SIGTERM)
@@ -302,6 +345,7 @@ class Runner:
             elif isinstance(ev, TrackStart):
                 self.store.upsert_track(iid, ev.i, ev.title, "downloading")
                 self.store.update_item(iid, track_i=ev.i, track_n=ev.total, current_title=ev.title, status="downloading")
+                self._fill_names(iid)
                 self.live = {"track_pct": 0.0, "speed": None}
                 self._progress(iid)
             elif isinstance(ev, Progress):
@@ -347,7 +391,10 @@ class Runner:
         """Track errors that are not rate-limit/auth: retry the album after a backoff, then give up.
         gamdl skips files that already exist (overwrite=false), so a re-run only fetches what is missing."""
         s = self.store.get_settings()
-        attempts = self.store.get_item(item["id"])["attempts"]
+        cur = self.store.get_item(item["id"])
+        attempts = cur["attempts"]
+        if cur.get("sf_fallback"):
+            msg = f"unavailable on forced storefront, retried with original storefront: {msg}"
         if attempts < s["track_retries"]:
             lo, hi = parse_range(s["retry_backoff"])
             fields.update(status="queued", attempts=attempts + 1, not_before=self._clock() + self._rand(lo, hi),
@@ -370,6 +417,34 @@ class Runner:
             fields.update(status="cancelled")
         elif run.paused_stop or self._stopping:
             fields.update(status="queued")
+        elif run.unavail > 0 and not run.bad and run.unavail >= run.errors and run.ok > 0 and (
+                run.finished is None or run.unavail >= run.finished):
+            # some tracks are not streamable: skip them, finish the album with a condition (done + finding)
+            fields.update(status="done", errors=0, not_before=None)
+            try:
+                fields.update(await asyncio.to_thread(self._describe_output, item))
+            except Exception as e:
+                fields["findings"] = json.dumps([f"post-download check failed: {type(e).__name__}"])
+            fl = json.loads(fields.get("findings") or "[]")
+            fl.insert(0, f"{run.unavail} track(s) not streamable on this account, skipped")
+            fields["findings"] = json.dumps(fl)
+            self.store.add_log(iid, "WARNING", f"[dashboard] {run.unavail} unavailable track(s) skipped, album finished with condition", now)
+            self.guard.reset()
+        elif run.unavail > 0 and not run.bad and run.unavail >= run.errors and not (run.suspect and run.ok == 0) and (
+                run.finished is None or run.unavail >= run.finished):
+            errors = max(run.errors, run.finished or 0)
+            fields.update(status="error", errors=errors, not_before=None, error_msg=(
+                f"unavailable for the account storefront: wrapper cannot play {run.unavail} track(s) "
+                "(region-only album, e.g. jp-only? needs an Apple Music account in that storefront); not retried"))
+            self.store.add_log(iid, "WARNING", "[dashboard] tracks unavailable for the account storefront, not retrying", now)
+            self.guard.reset()
+        elif run.suspect and not run.bad and run.ok == 0 and run.errors > 0 and (
+                run.region or (rc == 0 and run.finished is not None)):
+            sf = self.store.get_settings()["storefront"]
+            msg = f"unavailable on storefront {sf}; retrying with original storefront"
+            fields.update(status="queued", error_msg=msg, errors=0, not_before=None, sf_fallback=1)
+            self.store.add_log(iid, "WARNING", f"[dashboard] {msg}", now)
+            self.guard.reset()
         elif rc == 0 and run.finished is not None:
             errors = max(run.errors, run.finished)
             if errors == 0:
@@ -389,7 +464,47 @@ class Runner:
         self._last_finish = now
         self._state()
 
+    async def _prefetch(self, item):
+        """When an album starts: name, kind, artist and the whole track list from Apple's public lookup (one request per
+        album, never at add time), so the UI shows every track as queued straight away. Skipped quietly on any failure."""
+        if not self.cfg.prefetch or item["kind"] != "album" or item["track_id"] or not str(item["ext_id"]).isdigit():
+            return
+        try:
+            meta = await asyncio.wait_for(self.itunes.album(str(item["ext_id"]), self.store.get_settings()["storefront"] or "jp"), 8)
+            if not meta or not meta["tracks"]:
+                return
+            iid, n = item["id"], len(meta["tracks"])
+            info = {k: meta[k] for k in ("kind", "release_date", "genre", "copyright", "explicit", "artwork", "url", "total_ms")}
+            self.store.update_item(iid, title=display_title(meta["name"], meta["kind"]), artist=meta["artist"] or item["artist"],
+                                   expected_tracks=n, track_n=n, meta=json.dumps(info))
+            for t in meta["tracks"]:
+                self.store.upsert_track(iid, t["n"], t["title"], "queued", None, t["ms"], t["artist"] or None)
+            self.bus.publish({"type": "tracks", "item_id": iid})
+            self._state()
+        except Exception:  # Apple unreachable, timeout, odd data: the download itself must not care
+            pass
+
+    def _fill_names(self, iid):
+        """Items are queued without a title (nothing is looked up when adding), so take album and artist from the
+        folder gamdl is writing to (<Artist>/<Album>). Only fills blanks, and only when exactly one album is in play."""
+        try:
+            cur = self.store.get_item(iid)
+            if not cur or (cur["title"] and cur["artist"]):
+                return
+            dirs = checker.find_output_dirs(self.cfg.staging_dir, cur["started_at"] or 0)
+            if len(dirs) != 1:
+                return
+            fields = {}
+            if not cur["title"]:
+                fields["title"] = dirs[0].name
+            if not cur["artist"]:
+                fields["artist"] = dirs[0].parent.name
+            self.store.update_item(iid, **fields)
+        except Exception:  # cosmetic only, never let it disturb a download
+            pass
+
     def _describe_output(self, item) -> dict:
+        self._fill_names(item["id"])
         cur = self.store.get_item(item["id"])
         dirs = checker.find_output_dirs(self.cfg.staging_dir, cur["started_at"] or 0)
         if not dirs:

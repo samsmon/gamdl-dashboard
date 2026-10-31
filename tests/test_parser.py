@@ -13,6 +13,15 @@ def test_track_start_with_ansi():
     assert (ts.i, ts.total, ts.title) == (1, 17, "The City Where Whales Fall")
 
 
+def test_unavailable_signature_classified():
+    line = ('gamdl.api.exceptions.GamdlApiResponseError: Error fetching wrapper playback (Status code: 502): '
+            '{"detail":"Apple store error code=1159012072","error":"playback_dispatch_failed"}')
+    ev = parse_line(line, "ERROR")[-1]
+    assert isinstance(ev, Line) and ev.cls == "unavailable"
+    assert parse_line("[ERROR    19:00:00] This song is currently unavailable.")[-1].cls == "unavailable"
+    assert parse_line("[ERROR    19:00:00] HTTP 429 Too Many Requests")[-1].cls == "rate_limit"
+
+
 def test_skip():
     evs = parse_line('[WARNING  19:04:00] [Track   6/17 ] Skipping "End Roll": file exists')
     s = evs[0]
@@ -82,3 +91,18 @@ def test_unprefixed_traceback_inherits_error_level():
     assert ln.level == "ERROR" and ln.cls == "rate_limit"
     assert parse_line(line, prev_level="INFO")[-1].cls == "other"
     assert parse_line(line)[-1].cls == "other"
+
+
+def test_token_errors_are_classified():
+    from app.parser import classify
+    assert classify("ERROR", "Error fetching account info") == "token"
+    assert classify("ERROR", "GamdlApiResponseError: Error fetching MusicKit content") == "token"
+    assert classify("INFO", "Error fetching account info") == "other"
+
+
+def test_unprefixed_traceback_line_is_classified_unavailable():
+    from app.parser import classify
+    line = 'gamdl.api.exceptions.GamdlApiResponseError: Error fetching wrapper playback (Status code: 502): {"error":"playback_dispatch_failed"}'
+    assert classify("INFO", line) == "unavailable"
+    assert classify("ERROR", line) == "unavailable"
+    assert classify("INFO", "Downloading something") == "other"

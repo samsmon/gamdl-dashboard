@@ -37,6 +37,9 @@ function keepFocus(fn) {
     if (el && el !== document.activeElement) el.focus({ preventScroll: true });
   }
 }
+const fmtDur = ms => { if (!ms) return ""; const s = Math.round(ms / 1000), h_ = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  return h_ ? `${h_}:${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}` : `${m}:${String(r).padStart(2, "0")}`; };
+const cover = (it, cls) => it.meta && it.meta.artwork ? h("img", { class: cls, src: it.meta.artwork, alt: cls === "cover" ? "cover art" : "", loading: "lazy", referrerpolicy: "no-referrer", onerror: e => e.target.remove() }) : "";
 const fmtBytes = n => n == null ? "?" : n >= 1e9 ? (n / 1e9).toFixed(1) + " GB" : n >= 1e6 ? (n / 1e6).toFixed(1) + " MB" : Math.round(n / 1e3) + " KB";
 
 // ---- icons (stroke icons, same style as lucide) -----------------------
@@ -51,7 +54,7 @@ const ICON = {
   x: '<path d="M18 6L6 18M6 6l12 12"/>', copy: '<rect x="9" y="9" width="12" height="12"/><path d="M5 15V5h10"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>', check: '<path d="M4 12l5 5L20 6"/>',
   alert: '<circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 16.5v.5"/>', download: '<path d="M12 3v12M7 10l5 5 5-5M4 20h16"/>',
-  layers: '<path d="M12 3l9 5-9 5-9-5zM3 13l9 5 9-5"/>',
+  layers: '<path d="M12 3l9 5-9 5-9-5zM3 13l9 5 9-5"/>', bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0"/>',
 };
 function ico(name, size = 14) {
   const e = document.createElement("span");
@@ -65,15 +68,16 @@ const STATUS = { downloading: "DOWNLOADING", waiting: "WAITING", queued: "QUEUED
 const RUNNING = ["downloading", "waiting"], PENDING = ["queued", "downloading", "waiting"];
 const FILTERS = [
   ["all", "All", "layers", () => true],
-  ["downloading", "Downloading", "download", i => RUNNING.includes(i.status)],
-  ["queued", "Queued", "clock", i => i.status === "queued"],
+  ["queued", "Queued", "clock", i => PENDING.includes(i.status)],  // running item is listed here too (no separate Downloading view)
   ["completed", "Completed", "check", i => i.status === "done"],
   ["stopped", "Stopped", "stop", i => i.status === "cancelled"],
   ["failed", "Failed", "alert", i => i.status === "error"],
 ];
-let S = null, offset = 0, filter = "all", query = "", dtab = "general", dopen = true, connected = false, logFilter = "all";
+let S = null, offset = 0, filter = "all", query = "", dtab = "tracks", dopen = true, connected = false, logFilter = "all";
 const sel = new Set();
 let anchor = null;
+let view = "queue", relFilter = "new", relRows = [], follows = [];
+const relSel = new Set();
 const trackCache = {}, trackErr = new Set();
 
 const byId = id => S.items.find(i => i.id === id);
@@ -82,7 +86,8 @@ function visible() {
   return S.items.filter(f).filter(i => !q || [i.title, i.artist, i.url, i.original_url, i.status, STATUS[i.status]].join(" ").toLowerCase().includes(q));
 }
 const curItem = () => {
-  if (!S || !sel.size) return null;
+  if (!S) return null;
+  if (!sel.size) return S.items.find(i => RUNNING.includes(i.status)) || null;   // nothing selected: follow the running item
   return byId(sel.has(anchor) ? anchor : [...sel][0]) || null;
 };
 function caps() {
@@ -97,7 +102,8 @@ function caps() {
 }
 function albumPct(it) {
   if (it.status === "done") return 100;
-  if (!it.track_n) return 0;
+  if (!it.track_n || it.status === "queued") return 0;  // queued/retry: track_i is stale from the previous attempt
+  if (it.status === "waiting" && it.live?.delay_kind === "album") return 0;  // waiting before the album starts
   const done = it.status === "waiting" ? it.track_i : (it.track_i || 1) - 1;
   const cur = it.status === "downloading" ? (it.live?.track_pct || 0) / 100 : 0;
   return Math.min(100, ((done + cur) / it.track_n) * 100);
@@ -194,9 +200,14 @@ function renderSidebar() {
   }
   keepFocus(() => $("#sidebar").replaceChildren(
     h("div", { class: "side-h" }, "Status"),
-    ...FILTERS.map(([id, label, icon]) => h("button", { type: "button", class: "flt" + (filter === id ? " active" : ""), "data-key": "flt:" + id, "aria-pressed": String(filter === id),
-      onclick: () => { filter = id; renderRows(); renderSidebar(); renderQInfo(); } },
+    ...FILTERS.map(([id, label, icon]) => h("button", { type: "button", class: "flt" + (filter === id && view === "queue" ? " active" : ""), "data-key": "flt:" + id, "aria-pressed": String(filter === id && view === "queue"),
+      onclick: () => { filter = id; view = "queue"; applyView(); renderRows(); renderSidebar(); renderQInfo(); } },
       h("span", { class: "l" }, ico(icon), label), h("span", { class: "pill" }, counts[id]))),
+    h("div", { class: "side-h" }, "Releases"),
+    h("button", { type: "button", class: "flt" + (view === "releases" ? " active" : ""), "data-key": "view:releases", "aria-pressed": String(view === "releases"),
+      onclick: () => { view = "releases"; applyView(); renderSidebar(); loadReleases(); } },
+      h("span", { class: "l" }, ico("bell"), "New releases"), h("span", { class: "pill" }, S.releases.new)),
+    h("div", { class: "sys" }, h("div", { class: "dim" }, `following ${S.releases.follows} artist${S.releases.follows === 1 ? "" : "s"}`)),
     h("div", { class: "side-h" }, "System"),
     h("div", { class: "sys" },
       h("div", {}, h("div", { class: "k" }, "disk free"), fmtBytes(S.disk.free_bytes)),
@@ -207,11 +218,16 @@ function renderSidebar() {
 }
 function renderBanner() {
   const b = $("#banner"), msgs = [];
-  if (S.banner) msgs.push(`${S.banner.kind}: ${S.banner.reason}. Fix the cause, then press Start queue.`);
+  if (S.banner && S.banner.kind === "cap_reached" && S.cap.resume_at) {
+    const left = Math.max(0, Math.ceil(S.cap.resume_at - Date.now() / 1000)), m = Math.floor(left / 60);
+    msgs.push(`daily cap reached (${S.cap.used}/${S.cap.limit} tracks). Cooldown: queue auto-starts in ${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m ${String(left % 60).padStart(2, "0")}s.`);
+  } else if (S.banner && S.banner.kind === "token_invalid") msgs.push("Apple Music token invalid: the queue is paused. Paste a new token to resume.");
+  else if (S.banner) msgs.push(`${S.banner.kind}: ${S.banner.reason}. Fix the cause, then press Start queue.`);
   if (S.cookies.exists && S.cookies.problem) msgs.push(`cookies unusable: ${S.cookies.problem}.`);
   else if (S.cookies.expired) msgs.push("cookies expired: re-export cookies.txt.");
   else if (S.cookies.exists && S.cookies.expiry_days != null && S.cookies.expiry_days <= 7) msgs.push(`cookies expire in ${S.cookies.expiry_days} d: re-export soon.`);
   b.hidden = msgs.length === 0; b.textContent = msgs.join(" ");
+  maybeTokenModal();
 }
 function renderStatus() {
   const run = S.items.find(i => RUNNING.includes(i.status)), n = f => S.items.filter(f).length;
@@ -219,7 +235,7 @@ function renderStatus() {
   const stopped = n(i => i.status === "cancelled");
   $("#statusbar").replaceChildren(
     h("div", { class: "g" }, h("span", {}, h("b", {}, engine())),
-      run ? h("span", { class: "dim" }, `${run.title || run.url} (${Math.round(albumPct(run))}%)`) : ""),
+      run ? h("span", { class: "dim" }, `${run.title || run.url} (${Math.round(albumPct(run))}%)${trackLine(run) ? " \u00b7 " + trackLine(run) : ""}`) : ""),
     h("div", { class: "g" }, h("span", {}, "Active: ", h("b", {}, n(i => RUNNING.includes(i.status)))), h("span", {}, "Queued: ", h("b", {}, n(i => i.status === "queued"))),
       h("span", {}, "Done: ", h("b", {}, n(i => i.status === "done"))), stopped ? h("span", {}, "Stopped: ", h("b", {}, stopped)) : "",
       h("span", {}, "Failed: ", h("b", {}, n(i => i.status === "error")))),
@@ -236,8 +252,16 @@ function renderQInfo() {
   const el = $("#qinfo"); if (!el || !S) return;
   el.replaceChildren(sel.size ? h("b", {}, `${sel.size} selected`) : "", sel.size ? " · " : "", "Showing ", h("b", {}, visible().length), ` / ${S.items.length}`);
 }
+function trackLine(it) {
+  if (!RUNNING.includes(it.status) || !it.current_title) return "";
+  return `track ${it.track_i || 0}/${it.track_n || "?"}: ${it.current_title}`;
+}
+function nowText(it) {
+  const d = delayInfo(it), t = trackLine(it) || (it.track_n ? `track ${it.track_i || 0}/${it.track_n}` : "starting");
+  return t + (d ? " \u2014 " + countdown(d.label, d.until) : "");
+}
 let rowSig = null;
-const sigOf = items => items.map(i => [i.id, i.status, i.track_i, i.track_n, i.error_msg, i.attempts, i.not_before, i.title, i.artist, i.size_bytes, i.library_note, i.codec, (i.findings || []).length].join("|")).join("\n") + "#" + S.settings.track_retries;
+const sigOf = items => items.map(i => [i.id, i.status, i.track_i, i.track_n, i.current_title, i.meta ? 1 : 0, i.error_msg, i.attempts, i.not_before, i.title, i.artist, i.size_bytes, i.library_note, i.codec, (i.findings || []).length].join("|")).join("\n") + "#" + S.settings.track_retries;
 function renderRows() {
   const vis = visible(), frag = document.createDocumentFragment();
   rowSig = sigOf(S.items);
@@ -253,8 +277,9 @@ function renderRows() {
         if (e.key === "]") { sel.clear(); sel.add(it.id); anchor = it.id; priority("down"); }
       } },
       h("td", { class: "c-n" }, n + 1),
-      h("td", { class: "c-name", title: it.original_url || it.url }, h("div", {}, it.title || it.url),
-        it.artist ? h("div", { class: "sub" }, it.artist) : "", it.error_msg ? h("div", { class: "sub" }, it.error_msg) : ""),
+      h("td", { class: "c-name", title: it.original_url || it.url }, h("div", {}, cover(it, "thumb"), it.title || it.url),
+        it.artist ? h("div", { class: "sub" }, it.artist) : "", trackLine(it) ? h("div", { class: "sub" }, "\u25b6 " + trackLine(it)) : "",
+        it.error_msg ? h("div", { class: "sub" }, it.error_msg) : ""),
       h("td", { class: "c-status" }, h("span", { class: "chip st-" + it.status }, STATUS[it.status] || it.status)),
       h("td", { class: "c-prog" }, h("div", { class: "pcell" }, bar(pct, it.status === "waiting"), h("span", { class: "pct" }, Math.round(pct) + "%"))),
       h("td", { class: "c-tracks" }, it.track_n ? `${it.track_i || 0}/${it.track_n}` : "-"),
@@ -312,27 +337,34 @@ function trackTable(id) {
   if (!rows) return h("p", { class: "dim" }, "loading...");
   if (!rows.length) return h("p", { class: "dim" }, "no tracks yet.");
   return h("table", { class: "tracks" },
-    h("thead", {}, h("tr", {}, ["#", "status", "title", "note"].map(x => h("th", {}, x)))),
+    h("thead", {}, h("tr", {}, ["#", "status", "title", "artist", "length", "note"].map(x => h("th", {}, x)))),
     h("tbody", {}, rows.map(t => h("tr", {}, h("td", {}, t.idx), h("td", {}, h("span", { class: "chip st-" + (["error", "done", "downloading"].includes(t.status) ? t.status : "queued") }, t.status)),
-      h("td", { class: "c-name" }, t.title), h("td", { class: "dim" }, t.reason || "")))));
+      h("td", { class: "c-name" }, t.title), h("td", { class: "dim" }, t.artist && t.artist !== (byId(id) || {}).artist ? t.artist : ""),
+      h("td", {}, fmtDur(t.duration_ms)), h("td", { class: "dim" }, t.reason || "")))));
 }
 const kv = (k, v, cls = "") => h("div", { class: "r " + cls }, h("span", { class: "k" }, k), h("span", { class: "v sel-text" }, v));
 function generalPane(it) {
   const rel = (it.output_path || "").split(/[\\/]_gamdl-incoming[\\/]/)[1] || "";
   const smb = rel ? "\\\\192.168.18.225\\homelab\\hdd-backup\\music\\_gamdl-incoming\\" + rel.replaceAll("/", "\\") : "";
   const src = it.original_url || it.url;
+  const m = it.meta || {};
   const rows = [
     kv("Title", it.title || "-", "wide"),
-    kv("Artist", it.artist || "-"),
+    kv("Artist", [it.artist || "-", it.artist ? h("button", { type: "button", class: "tb", style: "margin-left:8px", title: "watch this artist for new releases", onclick: () => followFromItem(it) }, ico("bell", 12), "follow") : ""]),
+    ...(m.release_date ? [kv("Released", m.release_date)] : []),
+    ...(m.genre ? [kv("Genre", m.genre)] : []),
+    ...(m.total_ms ? [kv("Length", fmtDur(m.total_ms) + (m.explicit ? " \u00b7 explicit" : ""))] : []),
+    ...(m.copyright ? [kv("Label", m.copyright, "wide")] : []),
     kv("Link", h("a", { href: src, target: "_blank", rel: "noopener noreferrer" }, src)),
     kv("Status", [STATUS[it.status] || it.status, it.error_msg ? ` (${it.error_msg})` : ""]),
+    ...(RUNNING.includes(it.status) ? [kv("Now", nowText(it), "wide")] : []),
     kv("Tracks", it.track_n ? `${it.track_i || 0} / ${it.track_n}` : "-"),
     kv("Attempts", String(it.attempts || 0)),
     kv("Codec", it.codec ? `${it.codec}${it.classification ? ": " + it.classification : ""}` : "-"),
     kv("Size", it.status === "done" ? fmtBytes(it.size_bytes) : "-"),
   ];
   if (it.output_path) rows.push(kv("Saved to", [h("code", {}, smb || it.output_path), smb ? h("button", { type: "button", class: "tb", style: "margin-left:8px", onclick: () => navigator.clipboard?.writeText(smb) }, ico("copy", 12), "copy") : ""], "wide"));
-  const out = [h("div", { class: "kv" }, rows)];
+  const out = [h("div", { class: "gen" }, cover(it, "cover"), h("div", { class: "kv" }, rows))];
   if (it.library_note) out.push(h("div", { class: "funfact" }, h("b", {}, "Fun fact: "), it.library_note));
   if (it.status === "done") out.push(it.findings.length ? h("ul", { class: "plain" }, it.findings.map(f => h("li", {}, f))) : h("p", { class: "dim" }, "no findings"));
   return out;
@@ -389,6 +421,44 @@ function openModal(title, build) {
   (overlay.querySelector("textarea, input") || overlay.querySelector("footer button:last-child")).focus();
   return close;
 }
+function tokenStatus() {
+  const c = S.cookies;
+  if (!c.exists) return "cookies file missing";
+  if (c.problem) return "no media-user-token in the cookies file";
+  const age = c.age_days == null ? "" : `, file updated ${Math.round(c.age_days)} d ago`;
+  const exp = c.expired ? ", cookies expired" : c.expiry_days != null ? `, expires in ${c.expiry_days} d` : "";
+  return `token set (hidden)${age}${exp}`;
+}
+function tokenForm(onSaved) {
+  const input = h("input", { type: "password", id: "f-token", autocomplete: "off", spellcheck: "false", placeholder: "paste media-user-token" });
+  const msg = h("div", { class: "msg", role: "status" });
+  const save = h("button", { type: "button", class: "tb primary", onclick: async () => {
+    const token = input.value.trim();
+    if (!token) { msg.className = "msg err"; msg.textContent = "paste the token first"; input.focus(); return; }
+    save.disabled = true; msg.className = "msg"; msg.textContent = "saving...";
+    try {
+      await api("token", { method: "POST", body: { token } });
+      input.value = ""; msg.textContent = "token saved (hidden)";
+      await refresh().catch(fail); if (onSaved) onSaved();
+    } catch (e) { msg.className = "msg err"; msg.textContent = e.message; } finally { save.disabled = false; }
+  } }, "Save token");
+  return { input, msg, save };
+}
+let tokenModalOpen = false;
+function maybeTokenModal() {
+  if (tokenModalOpen || !S.banner || S.banner.kind !== "token_invalid") return;
+  tokenModalOpen = true;
+  openModal("Apple Music token invalid", close => {
+    const f = tokenForm(() => close());
+    const done = () => { tokenModalOpen = false; close(); };
+    f.save.addEventListener("click", () => setTimeout(() => { if (!$("#f-token")) tokenModalOpen = false; }, 0));
+    return { body: [h("p", {}, "gamdl could not authenticate: the media-user-token is invalid or expired. The queue is paused. Paste a new token to resume."),
+      h("div", { class: "field" }, h("label", { for: "f-token", class: "dim" }, "media-user-token"), f.input), f.msg],
+      footer: [h("button", { type: "button", class: "tb", onclick: done }, "Later"), f.save] };
+  });
+  const root = $("#modal-root");
+  new MutationObserver((_, o) => { if (!root.querySelector("[aria-label='Apple Music token invalid']")) { tokenModalOpen = false; o.disconnect(); } }).observe(root, { childList: true });
+}
 function openAdd() {
   openModal("Add URLs", close => {
     const ta = h("textarea", { spellcheck: "false", "aria-label": "urls", placeholder: "https://music.apple.com/jp/album/...\none URL per line" });
@@ -428,6 +498,7 @@ async function openSettings() {
   const fields = [["track_delay", "track delay s (min-max)"], ["album_delay", "album delay s (min-max)"], ["error_threshold", "pause after N 429/403"],
     ["low_disk_gb", "low disk GB"], ["max_tracks_per_24h", "max tracks / 24 h (0 = off)"], ["storefront", "storefront (empty = keep url's own)"],
     ["track_retries", "album retries after a track error"], ["retry_backoff", "retry backoff s (min-max)"],
+    ["release_check_hours", "check followed artists every N hours"],
     ["library_exact", "library note: in-library score"], ["library_similar", "library note: similar score"]];
   const text = ["track_delay", "album_delay", "storefront", "retry_backoff"];
   openModal("Settings", close => {
@@ -445,8 +516,89 @@ async function openSettings() {
       }
       try { await api("settings", { method: "PUT", body }); refresh().catch(fail); close(); say(""); } catch (e) { msg.className = "msg err"; msg.textContent = e.message; }
     } }, "Save");
-    return { body: [...rows, msg], footer: [h("button", { type: "button", class: "tb", onclick: close }, "Cancel"), save] };
+    const tf = tokenForm();
+    const tokBox = h("div", {}, h("h4", {}, "Apple Music token"), h("div", { class: "dim" }, tokenStatus()),
+      h("div", { class: "field" }, h("label", { for: "f-token", class: "dim" }, "new media-user-token"), tf.input), h("div", {}, tf.save), tf.msg);
+    return { body: [...rows, msg, tokBox], footer: [h("button", { type: "button", class: "tb", onclick: close }, "Cancel"), save] };
   });
+}
+
+// ---- followed artists and their releases -------------------------------
+function applyView() { $(".pane").hidden = view !== "queue"; $("#relpane").hidden = view !== "releases"; }
+const ago = ts => {
+  if (!ts) return "never";
+  const s = Math.max(0, nowSrv() - ts);
+  return s < 90 ? "just now" : s < 5400 ? Math.round(s / 60) + " min ago" : s < 172800 ? Math.round(s / 3600) + " h ago" : Math.round(s / 86400) + " d ago";
+};
+async function loadReleases() {
+  try { [relRows, follows] = await Promise.all([api("releases?status=" + relFilter), api("follows")]); } catch (e) { fail(e); return; }
+  const ids = new Set(relRows.map(r => r.id));
+  for (const id of [...relSel]) if (!ids.has(id)) relSel.delete(id);
+  renderRel();
+}
+async function relAct(ids, action) {
+  if (!ids.length) return;
+  try {
+    const { results } = await api("releases/bulk", { method: "POST", body: { ids, action } });
+    const errs = results.filter(r => r.error);
+    if (errs.length) say(errs.map(e => e.error).join("; "));
+  } catch (e) { fail(e); }
+  relSel.clear(); await loadReleases(); refresh().catch(fail);
+}
+async function doFollow() {
+  const inp = $("#follow-input"), label = $("#follow-label");
+  if (!inp.value.trim()) { inp.focus(); return; }
+  try {
+    const r = await api("follows", { method: "POST", body: { input: inp.value, label_filter: label.value || null } });
+    inp.value = ""; label.value = "";
+    say(r.created ? `following ${r.name}: existing releases are marked as older, only new ones will show up` : `already following ${r.name}`);
+  } catch (e) { fail(e); }
+  loadReleases(); refresh().catch(fail);
+}
+async function followFromItem(it) {
+  try { const r = await api("follows", { method: "POST", body: { input: it.original_url || it.url } }); say(r.created ? `following ${r.name}` : `already following ${r.name}`); }
+  catch (e) { fail(e); }
+  refresh().catch(fail); if (view === "releases") loadReleases();
+}
+function renderRel() {
+  const body = $("#rel-body"); if (!body) return;
+  const TABS = [["new", "New"], ["seen", "Older"], ["added", "Added"], ["dismissed", "Dismissed"]];
+  const canAdd = ["new", "seen", "dismissed"].includes(relFilter), canDismiss = ["new", "seen"].includes(relFilter);
+  const picked = [...relSel];
+  const allBox = h("input", { type: "checkbox", "aria-label": "select all", checked: relRows.length > 0 && relRows.every(r => relSel.has(r.id)),
+    onchange: e => { if (e.target.checked) relRows.forEach(r => relSel.add(r.id)); else relSel.clear(); renderRel(); } });
+  const relTable = relRows.length ? h("table", {},
+    h("thead", {}, h("tr", {}, h("th", { class: "c-chk" }, allBox), ["Artist", "Title", "Type", "Released", "Tracks", ""].map(x => h("th", {}, x)))),
+    h("tbody", {}, relRows.map(r => h("tr", { class: relSel.has(r.id) ? "sel" : "" },
+      h("td", { class: "c-chk" }, h("input", { type: "checkbox", "aria-label": "select " + r.title, checked: relSel.has(r.id), onchange: e => { if (e.target.checked) relSel.add(r.id); else relSel.delete(r.id); renderRel(); } })),
+      h("td", {}, r.artist), h("td", { class: "c-name", title: r.copyright }, h("div", {}, r.title), r.queued ? h("div", { class: "sub" }, "already in queue / history") : ""),
+      h("td", {}, h("span", { class: "chip" }, r.kind)), h("td", {}, r.release_date), h("td", {}, r.track_count ?? "-"),
+      h("td", { class: "acts" },
+        canAdd ? h("button", { type: "button", class: "tb", onclick: () => relAct([r.id], "add") }, ico("plus", 12), "Add") : "",
+        canDismiss ? h("button", { type: "button", class: "tb", onclick: () => relAct([r.id], "dismiss") }, ico("x", 12), "Dismiss") : "",
+        relFilter === "dismissed" ? h("button", { type: "button", class: "tb", onclick: () => relAct([r.id], "restore") }, ico("retry", 12), "Restore") : ""))))
+  ) : h("p", { class: "empty" }, relFilter === "new" ? (follows.length ? "no new releases yet. Followed artists are checked in the background." : "not following anyone yet. Paste an artist or album link above, or press \"follow\" on a finished download.") : "nothing here.");
+  const folTable = follows.length ? h("table", {},
+    h("thead", {}, h("tr", {}, ["Artist", "Label filter", "New", "Last checked", "Status", ""].map(x => h("th", {}, x)))),
+    h("tbody", {}, follows.map(f => {
+      const lbl = h("input", { value: f.label_filter || "", placeholder: "any", "aria-label": "label filter for " + f.name, title: "only releases whose ℗ text contains this",
+        onchange: async e => { try { await api("follows/" + f.id, { method: "PUT", body: { label_filter: e.target.value } }); say("label filter saved (applies to the next check)"); } catch (er) { fail(er); } } });
+      return h("tr", {},
+        h("td", {}, h("a", { href: `https://music.apple.com/${f.storefront}/artist/${f.artist_id}`, target: "_blank", rel: "noopener noreferrer" }, f.name)),
+        h("td", {}, lbl), h("td", {}, f.new || 0), h("td", { class: "dim" }, ago(f.last_checked)),
+        h("td", {}, f.last_error ? h("span", { class: "chip st-error", title: f.last_error }, "error") : f.baseline_done ? "ok" : "checking..."),
+        h("td", { class: "acts" }, h("button", { type: "button", class: "tb", onclick: async () => { try { await api("follows/" + f.id, { method: "DELETE" }); } catch (e) { fail(e); } loadReleases(); refresh().catch(fail); } }, ico("trash", 12), "Unfollow")));
+    }))) : h("p", { class: "dim" }, "none");
+  body.replaceChildren(
+    h("div", { class: "rowbar" },
+      ...TABS.map(([id, label]) => h("button", { type: "button", class: "tb" + (relFilter === id ? " on" : ""), "aria-pressed": String(relFilter === id), onclick: () => { relFilter = id; relSel.clear(); loadReleases(); } }, label, id === "new" && S ? ` (${S.releases.new})` : "")),
+      h("span", { class: "grow" }),
+      canAdd ? h("button", { type: "button", class: "tb primary", disabled: !picked.length, onclick: () => relAct(picked, "add") }, ico("plus", 12), `Add selected (${picked.length})`) : "",
+      canDismiss ? h("button", { type: "button", class: "tb", disabled: !picked.length, onclick: () => relAct(picked, "dismiss") }, "Dismiss selected") : "",
+      relFilter === "dismissed" ? h("button", { type: "button", class: "tb", disabled: !picked.length, onclick: () => relAct(picked, "restore") }, "Restore selected") : ""),
+    h("div", { class: "tablewrap relist" }, relTable),
+    h("div", { class: "side-h" }, `Following (${follows.length})`),
+    h("div", { class: "tablewrap folist" }, folTable));
 }
 
 // ---- refresh, log, live events ---------------------------------------
@@ -479,6 +631,7 @@ function connect() {
     let ev; try { ev = JSON.parse(m.data); } catch { return; }
     if (ev.type === "log") addLog(ev);
     else if (ev.type === "tracks") scheduleTracks(ev.item_id);
+    else if (ev.type === "releases") { if (view === "releases") loadReleases(); scheduleRefresh(); }
     else if (ev.type === "progress" && S) {
       const it = byId(ev.item_id);
       if (it) { it.live = { track_pct: ev.pct, speed: ev.speed, delay_kind: ev.delay_kind, delay_until: ev.delay_until }; updateLive(); }
@@ -494,6 +647,13 @@ $("#qhead").replaceChildren(
       oninput: e => { query = e.target.value; $("#search-clear").hidden = !query; if (S) { renderRows(); renderQInfo(); } } }),
     h("button", { type: "button", id: "search-clear", hidden: true, "aria-label": "clear filter", onclick: () => { $("#search").value = ""; query = ""; $("#search-clear").hidden = true; if (S) { renderRows(); renderQInfo(); } } }, ico("x", 12))),
   h("div", { class: "qinfo", id: "qinfo" }));
+$("#relpane").replaceChildren(
+  h("div", { class: "relhead" },
+    h("input", { id: "follow-input", "aria-label": "artist to follow", placeholder: "Artist link, album link or artist ID", spellcheck: "false", onkeydown: e => { if (e.key === "Enter") doFollow(); } }),
+    h("input", { id: "follow-label", "aria-label": "label filter", placeholder: "label filter (optional)", title: "only releases whose ℗ text contains this, e.g. a label name", spellcheck: "false", onkeydown: e => { if (e.key === "Enter") doFollow(); } }),
+    tb("plus", "Follow", { class: "primary", onclick: doFollow }),
+    tb("retry", "Check now", { title: "check all followed artists now", onclick: async () => { try { await api("follows/check", { method: "POST" }); say("checking followed artists..."); } catch (e) { fail(e); } } })),
+  h("div", { id: "rel-body", class: "relbody" }));
 document.addEventListener("click", e => { if (!e.target.closest("#ctx")) closeCtx(); });
 document.addEventListener("scroll", closeCtx, true);
 document.addEventListener("keydown", e => {
@@ -522,3 +682,4 @@ setInterval(() => document.querySelectorAll("[data-until]").forEach(e => { e.tex
   connect();
   (async function start() { try { await refresh(); renderDTabs(); renderDBody(); say(""); } catch (e) { fail(e); setTimeout(start, 3000); } })();
 })();
+setInterval(() => { if (S && S.banner && S.banner.kind === "cap_reached") renderBanner(); }, 1000);

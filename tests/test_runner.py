@@ -369,11 +369,77 @@ async def test_errors_without_429_text_still_halt(env):
     mp.setenv("FAKE_SCENARIO", "errors_no_text")
     mp.setenv("FAKE_TRACKS", "6")
     a = add(store, 1)
-    await runner.step()
+    await runner.step()  # first run is treated as a possible region failure: one fallback, no banner yet
+    it = store.get_item(a)
+    assert it["status"] == "queued" and it["sf_fallback"] == 1 and store.get_banner() is None
+    await runner.step()  # fallback run (original storefront) fails the same way: now it halts as before
     it = store.get_item(a)
     assert it["status"] == "queued" and it["attempts"] == 0 and it["not_before"] is None
     assert store.get_banner()["kind"] == "rate_limited" and store.get_flag("paused") == "1"
     assert await runner.step() is False
+
+
+async def test_region_failure_falls_back_once_to_original_storefront(env, tmp_path):
+    runner, store, _, mp = env
+    log = tmp_path / "env.log"
+    mp.setenv("FAKE_SCENARIO", "region")
+    mp.setenv("FAKE_ENVLOG", str(log))
+    mp.setenv("FAKE_TRACKS", "5")
+    a = store.add_item("https://music.apple.com/jp/album/7", "https://music.apple.com/id/album/7", "album", "7")
+    await runner.step()
+    it = store.get_item(a)
+    assert it["status"] == "queued" and it["sf_fallback"] == 1 and it["attempts"] == 0
+    assert "unavailable on storefront jp" in it["error_msg"]
+    assert store.get_banner() is None and store.get_flag("paused") != "1"
+    assert any("retrying with original storefront" in r["text"] for r in store.tail_log())
+    await runner.step()
+    it = store.get_item(a)
+    assert it["status"] == "done" and it["errors"] == 0
+    first, second = log.read_text().splitlines()
+    assert first == "jp|https://music.apple.com/jp/album/7"
+    assert second == "|https://music.apple.com/id/album/7"  # nothing forced, original-storefront URL
+    assert store.get_banner() is None
+
+
+async def test_region_failure_single_unknown_title_error_also_falls_back(env, tmp_path):
+    runner, store, _, mp = env
+    mp.setenv("FAKE_SCENARIO", "region")
+    mp.setenv("FAKE_TRACKS", "1")
+    a = add(store, 8)
+    await runner.step()
+    assert store.get_item(a)["sf_fallback"] == 1 and store.get_banner() is None
+    await runner.step()
+    assert store.get_item(a)["status"] == "done"
+
+
+async def test_region_fallback_not_used_when_storefront_not_forced(env):
+    runner, store, _, mp = env
+    store.put_settings({"storefront": ""})
+    mp.setenv("FAKE_SCENARIO", "errors_no_text")
+    mp.setenv("FAKE_TRACKS", "6")
+    a = add(store, 9)
+    await runner.step()
+    assert store.get_item(a)["sf_fallback"] == 0
+    assert store.get_banner()["kind"] == "rate_limited"
+
+
+async def test_real_rate_limit_text_is_not_a_region_failure(env):
+    runner, store, _, mp = env
+    mp.setenv("FAKE_SCENARIO", "rate_limit")
+    mp.setenv("FAKE_TRACKS", "6")
+    a = add(store, 10)
+    await runner.step()
+    assert store.get_item(a)["sf_fallback"] == 0
+    assert store.get_banner()["kind"] == "rate_limited"
+
+
+async def test_token_invalid_unaffected_by_fallback(env):
+    runner, store, _, mp = env
+    mp.setenv("FAKE_SCENARIO", "token")
+    a = add(store, 11)
+    await runner.step()
+    assert store.get_item(a)["sf_fallback"] == 0
+    assert store.get_banner()["kind"] == "token_invalid"
 
 
 async def test_traceback_429_lines_halt(env):
@@ -437,3 +503,123 @@ async def test_fun_fact_says_new_for_unknown_album_and_stays_silent_without_libr
     await runner.step()
     it = store.get_item(b)
     assert it["status"] == "done" and it["library_note"] is None
+
+
+async def test_missing_title_and_artist_are_filled_from_the_output_folder(env):
+    runner, store, _, _ = env
+    a = add(store, 1)  # queued without a title, like every url added through the UI
+    await runner.step()
+    it = store.get_item(a)
+    assert it["title"] == "Album" and it["artist"] == "Artist ~"
+    b = add(store, 2, title="Keep me", artist="Me")
+    await runner.step()
+    it = store.get_item(b)
+    assert it["title"] == "Keep me" and it["artist"] == "Me"  # only blanks are filled
+
+
+async def test_album_start_prefills_name_kind_artist_and_every_track_as_queued(env):
+    from app.releases import Itunes
+    runner, store, _, _ = env
+
+    async def getter(params):
+        coll = {"wrapperType": "collection", "collectionId": 1, "collectionName": "Fresh - Single", "artistName": "Someone", "trackCount": 3,
+                "releaseDate": "2026-05-01T07:00:00Z", "primaryGenreName": "Pop", "copyright": "\u2117 2026 Label X",
+                "artworkUrl100": "https://is1-ssl.mzstatic.com/a/100x100bb.jpg"}
+        songs = [{"wrapperType": "track", "kind": "song", "trackName": f"Song {i}", "trackNumber": i, "discNumber": 1, "trackTimeMillis": 1000 * i,
+                  "artistName": "Someone feat. Guest" if i == 2 else "Someone"} for i in (1, 2, 3)]
+        return {"results": [coll, *songs]}
+
+    runner.cfg.prefetch = True
+    runner.itunes = Itunes(getter=getter)
+    a = add(store, 1)
+    await runner._prefetch(store.get_item(a))
+    it = store.get_item(a)
+    assert it["title"] == "Fresh - Single" and it["artist"] == "Someone" and it["track_n"] == 3
+    assert [(t["idx"], t["title"], t["status"]) for t in store.list_tracks(a)] == [(1, "Song 1", "queued"), (2, "Song 2", "queued"), (3, "Song 3", "queued")]
+    import json
+    meta = json.loads(it["meta"])
+    assert meta["release_date"] == "2026-05-01" and meta["genre"] == "Pop" and meta["copyright"].endswith("Label X") and meta["total_ms"] == 6000
+    assert meta["artwork"] == "https://is1-ssl.mzstatic.com/a/300x300bb.jpg" and meta["kind"] == "single"
+    assert [(t["duration_ms"], t["artist"]) for t in store.list_tracks(a)] == [(1000, "Someone"), (2000, "Someone feat. Guest"), (3000, "Someone")]
+    await runner.step()  # the real run keeps the rows and moves them along
+    assert [t["status"] for t in store.list_tracks(a)] == ["done"] * 3
+    assert store.get_item(a)["title"] == "Fresh - Single"
+    assert [t["duration_ms"] for t in store.list_tracks(a)] == [1000, 2000, 3000]  # durations survive the status updates
+
+
+async def test_prefetch_failure_never_breaks_the_download(env):
+    from app.releases import Itunes
+    runner, store, _, _ = env
+
+    async def boom(params):
+        raise RuntimeError("apple is down")
+
+    runner.cfg.prefetch = True
+    runner.itunes = Itunes(getter=boom)
+    a = add(store, 1)
+    await runner.step()
+    assert store.get_item(a)["status"] == "done"
+
+
+async def test_token_error_pauses_with_token_invalid_and_does_not_burn_retries(env):
+    runner, store, _, mp = env
+    store.put_settings({"track_retries": 3})
+    mp.setenv("FAKE_SCENARIO", "token")
+    a = add(store, 1)
+    await runner.step()
+    assert store.get_banner()["kind"] == "token_invalid"
+    assert store.get_flag("paused") == "1"
+    it = store.get_item(a)
+    assert it["status"] == "queued" and it["attempts"] == 0
+    assert await runner.step() is False  # stays paused, nothing runs
+
+
+async def test_cap_auto_resumes_when_window_is_empty(env):
+    runner, store, _, _ = env
+    store.put_settings({"max_tracks_per_24h": 2, "auto_resume_after_cap": True})
+    store.set_flag("paused", "1")
+    store.set_banner("cap_reached", "2 tracks in 24 h")  # nothing recorded in the last 24 h
+    a = add(store, 1)
+    assert await runner.step() is True
+    assert store.get_banner() is None and store.get_item(a)["status"] == "done"
+
+
+async def test_unavailable_tracks_end_cleanly(env, tmp_path):
+    runner, store, _, mp = env
+    log = tmp_path / "env.log"
+    mp.setenv("FAKE_SCENARIO", "unavailable")
+    mp.setenv("FAKE_ENVLOG", str(log))
+    mp.setenv("FAKE_TRACKS", "5")
+    store.put_settings({"track_retries": 2})
+    a = store.add_item("https://music.apple.com/jp/album/7", "https://music.apple.com/jp/album/7", "album", "7")
+    b = add(store, 8)
+    await runner.step()
+    it = store.get_item(a)
+    assert it["status"] == "error" and it["attempts"] == 0 and it["errors"] == 5 and it["sf_fallback"] in (0, None)
+    assert "unavailable for the account storefront" in it["error_msg"] and "not retried" in it["error_msg"]
+    assert store.get_banner() is None and store.get_flag("paused") != "1"
+    mp.setenv("FAKE_SCENARIO", "ok")
+    await runner.step()  # queue keeps flowing, no fallback run of item a
+    assert store.get_item(b)["status"] == "done" and store.get_item(a)["status"] == "error"
+    assert store.get_banner() is None
+
+
+async def test_unavailable_partial_is_final_not_retried(env):
+    runner, store, _, mp = env
+    mp.setenv("FAKE_SCENARIO", "unavailable_partial")
+    store.put_settings({"track_retries": 2})
+    a = add(store, 1)
+    await runner.step()
+    it = store.get_item(a)
+    assert it["status"] == "error" and it["attempts"] == 0 and it["errors"] == 1
+    assert "unavailable for the account storefront" in it["error_msg"]
+    assert store.get_banner() is None and store.get_flag("paused") != "1"
+
+
+async def test_real_429_still_halts_after_unavailable_support(env):
+    runner, store, _, mp = env
+    mp.setenv("FAKE_SCENARIO", "rate_limit")
+    mp.setenv("FAKE_TRACKS", "6")
+    a = add(store, 1)
+    await runner.step()
+    assert store.get_banner()["kind"] == "rate_limited" and store.get_item(a)["status"] == "queued"

@@ -114,3 +114,29 @@ def test_history_totals(store):
     store.update_item(b, status="error", size_bytes=999, track_n=5)
     assert store.history_totals() == (90, 10)
     assert [i["id"] for i in store.done_items()] == [a]
+
+
+def test_old_databases_are_migrated_in_place(tmp_path):
+    import sqlite3
+    p = str(tmp_path / "old.sqlite")
+    db = sqlite3.connect(p)
+    db.executescript("""
+    CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL, original_url TEXT, kind TEXT, ext_id TEXT,
+      track_id TEXT, status TEXT NOT NULL DEFAULT 'queued', position REAL NOT NULL DEFAULT 0, title TEXT, artist TEXT, expected_tracks INTEGER,
+      url_i INTEGER, url_n INTEGER, track_i INTEGER, track_n INTEGER, current_title TEXT, errors INTEGER NOT NULL DEFAULT 0,
+      output_path TEXT, size_bytes INTEGER, error_msg TEXT, findings TEXT, created_at REAL, started_at REAL, finished_at REAL,
+      attempts INTEGER NOT NULL DEFAULT 0, not_before REAL, codec TEXT, classification TEXT, library_status TEXT);
+    CREATE TABLE tracks(item_id INTEGER NOT NULL, idx INTEGER NOT NULL, title TEXT, status TEXT, reason TEXT, PRIMARY KEY(item_id, idx));
+    INSERT INTO items(url, kind, ext_id, status) VALUES('https://music.apple.com/jp/album/1', 'album', '1', 'done');
+    INSERT INTO tracks(item_id, idx, title, status) VALUES(1, 1, 'old track', 'done');
+    """)
+    db.commit()
+    db.close()
+    from app.store import Store
+    s = Store(p)
+    it = s.get_item(1)
+    assert it["status"] == "done" and it["meta"] is None and it["library_note"] is None  # history survives
+    s.update_item(1, meta="{}", library_note="x")
+    s.upsert_track(1, 1, "old track", "done", None, 1234, "A")
+    assert s.list_tracks(1)[0]["duration_ms"] == 1234 and s.list_tracks(1)[0]["artist"] == "A"
+    Store(p)  # opening twice is fine

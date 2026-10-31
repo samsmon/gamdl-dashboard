@@ -25,8 +25,8 @@ def test_parse_range():
 
 
 @pytest.mark.parametrize("patch", [
-    {"track_delay": "2-4"},          # below 5 s floor
-    {"album_delay": "10-20"},        # below 30 s floor
+    {"track_delay": "0.5-2"},        # below 1 s floor
+    {"album_delay": "2-4"},          # below 5 s floor
     {"track_delay": "20-8"},         # min > max
     {"track_delay": "abc"},
     {"error_threshold": 0},
@@ -99,14 +99,19 @@ def test_range_upper_bound():
 
 def test_range_boundary_at_floors():
     """Ranges at exactly the floor values should be accepted."""
-    assert validate({"track_delay": "5-5"}) == {"track_delay": "5-5"}
-    assert validate({"album_delay": "30-30"}) == {"album_delay": "30-30"}
+    assert validate({"track_delay": "1-1"}) == {"track_delay": "1-1"}
+    assert validate({"album_delay": "5-5"}) == {"album_delay": "5-5"}
     assert validate({"retry_backoff": "30-30"}) == {"retry_backoff": "30-30"}
 
 
 def test_range_below_floor_boundary():
     """Ranges slightly below the floor should be rejected."""
+    with pytest.raises(ValueError, match="minimum must be at least 1"):
+        validate({"track_delay": "0.9-9"})
     with pytest.raises(ValueError, match="minimum must be at least 5"):
-        validate({"track_delay": "4.9-9"})
-    with pytest.raises(ValueError, match="minimum must be at least 30"):
-        validate({"album_delay": "29.9-40"})
+        validate({"album_delay": "4.9-40"})
+
+
+def test_fast_pace_is_allowed():
+    """The owner may run 2-5 s per track and 10-15 s per album (their account, their call)."""
+    assert validate({"track_delay": "2-5", "album_delay": "10-15", "max_tracks_per_24h": 300}) == {"track_delay": "2-5", "album_delay": "10-15", "max_tracks_per_24h": 300}

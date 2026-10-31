@@ -1,8 +1,8 @@
 import re
 import math
 
-TRACK_FLOOR = 5.0
-ALBUM_FLOOR = 30.0
+TRACK_FLOOR = 1.0   # sanity guard only (never 0); the owner chooses the actual pace
+ALBUM_FLOOR = 5.0
 RETRY_FLOOR = 30.0
 
 DEFAULTS = {
@@ -11,13 +11,15 @@ DEFAULTS = {
     "error_threshold": 3,
     "low_disk_gb": 20,
     "max_tracks_per_24h": 150,
-    "auto_resume_after_cap": False,
+    "auto_resume_after_cap": True,
+    "cap_resume_slots": 20,
     "storefront": "jp",
     "preview_max_tracks": 100,
     "library_exact": 0.85,
     "library_similar": 0.55,
     "track_retries": 2,
     "retry_backoff": "120-300",
+    "release_check_hours": 6,
 }
 
 
@@ -114,8 +116,10 @@ _RULES = {
     "low_disk_gb": _int("low_disk_gb", 0, 2000),
     "max_tracks_per_24h": _int("max_tracks_per_24h", 0, 5000),
     "auto_resume_after_cap": _bool("auto_resume_after_cap"),
+    "cap_resume_slots": _int("cap_resume_slots", 1, 5000),
     "storefront": _storefront,
     "preview_max_tracks": _int("preview_max_tracks", 1, 5000),
+    "release_check_hours": _int("release_check_hours", 1, 168),
 }
 
 
